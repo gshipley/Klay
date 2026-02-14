@@ -1,0 +1,13 @@
+:root {
+  --accent-color: var(--purple-1);
+  --accent-bg-color: var(--purple-4);
+}
+
+#details_view {
+    background-color: black;
+}
+
+#details_view_play_button {
+    color: rgba(0, 0, 0, .8);
+    background-color: white;
+}

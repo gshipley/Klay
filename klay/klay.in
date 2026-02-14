@@ -1,0 +1,69 @@
+#!@PYTHON@
+
+# klay.in
+#
+# Copyright 2022-2024 kramo
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+import gettext
+import locale
+import os
+import signal
+import sys
+from pathlib import Path
+from platform import system
+
+VERSION = "@VERSION@"
+GETTEXT_DOMAIN = "@GETTEXT_DOMAIN@"
+
+if os.name == "nt":
+    PKGDATADIR = os.path.join(
+        os.path.dirname(__file__), "..", "share", "@DATA_DIR_NAME@"
+    )
+else:
+    PKGDATADIR = "@pkgdatadir@"
+    LOCALEDIR = "@localedir@"
+
+script_dir = Path(__file__).resolve().parent
+build_root = script_dir.parent
+source_root = build_root.parent
+build_schema_dir = build_root / "data"
+
+# Prefer build/source paths for local development, then installed data.
+# Include build root so generated modules (e.g. shared.py) are importable.
+for path in (str(build_root), str(source_root), PKGDATADIR):
+    if path not in sys.path:
+        sys.path.insert(1, path)
+
+# In local build trees, point GSettings at the compiled schema bundle.
+if "GSETTINGS_SCHEMA_DIR" not in os.environ:
+    if (build_schema_dir / "gschemas.compiled").is_file():
+        os.environ["GSETTINGS_SCHEMA_DIR"] = str(build_schema_dir)
+
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+if system() == "Linux":
+    locale.bindtextdomain(GETTEXT_DOMAIN, LOCALEDIR)
+    locale.textdomain(GETTEXT_DOMAIN)
+    gettext.install(GETTEXT_DOMAIN, LOCALEDIR, names=['ngettext'])
+else:
+    gettext.install(GETTEXT_DOMAIN, names=['ngettext'])
+
+if __name__ == "__main__":
+    from klay.qt import main
+
+    sys.exit(main.main(VERSION))

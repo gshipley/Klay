@@ -1,0 +1,706 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) YEAR kramo
+# This file is distributed under the same license as the Cartridges package.
+# Matt C <matei.gurzu@gmail.com>, 2023.
+# Remus-Gabriel Chelu <remusgabriel.chelu@disroot.org>, 2024, 2025.
+msgid ""
+msgstr ""
+"Project-Id-Version: Cartridges\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2024-11-05 14:01+0100\n"
+"PO-Revision-Date: 2025-02-06 08:01+0000\n"
+"Last-Translator: Remus-Gabriel Chelu <remusgabriel.chelu@disroot.org>\n"
+"Language-Team: Romanian <https://hosted.weblate.org/projects/cartridges/"
+"cartridges/ro/>\n"
+"Language: ro\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=3; plural=n==1 ? 0 : (n==0 || (n%100 > 0 && n%100 < "
+"20)) ? 1 : 2;\n"
+"X-Generator: Weblate 5.10-dev\n"
+
+#: data/page.kramo.Cartridges.desktop.in:3
+#: data/page.kramo.Cartridges.metainfo.xml.in:9
+#: data/page.kramo.Cartridges.metainfo.xml.in:40 data/gtk/window.blp:47
+#: data/gtk/window.blp:83
+msgid "Cartridges"
+msgstr "Cartușe"
+
+#: data/page.kramo.Cartridges.desktop.in:4
+msgid "Game Launcher"
+msgstr "Lansator de jocuri"
+
+#: data/page.kramo.Cartridges.desktop.in:5
+#: data/page.kramo.Cartridges.metainfo.xml.in:10
+msgid "Launch all your games"
+msgstr "Lansați toate jocurile dvs."
+
+#: data/page.kramo.Cartridges.desktop.in:11
+msgid ""
+"gaming;launcher;steam;lutris;heroic;bottles;itch;flatpak;legendary;retroarch;"
+msgstr ""
+"jocuri;lansator;gaming;launcher;steam;lutris;heroic;bottles;itch;flatpak;"
+"legendary;retroarch;"
+
+#: data/page.kramo.Cartridges.metainfo.xml.in:12
+msgid ""
+"Cartridges is a simple game launcher for all of your games. It has support "
+"for importing games from Steam, Lutris, Heroic and more with no login "
+"necessary. You can sort and hide games or download cover art from "
+"SteamGridDB."
+msgstr ""
+"Cartușe este un lansator de jocuri simplu pentru toate jocurile tale. Acesta "
+"are suport pentru importul de jocuri de pe Steam, Lutris, Heroic și multe "
+"altele, fără a fi necesară autentificarea. Puteți sorta și ascunde jocurile "
+"sau descărca coperta jocului din SteamGridDB."
+
+#: data/page.kramo.Cartridges.metainfo.xml.in:44 data/gtk/window.blp:320
+#: cartridges/details_dialog.py:77
+msgid "Game Details"
+msgstr "Detalii joc"
+
+#: data/page.kramo.Cartridges.metainfo.xml.in:48
+msgid "Edit Game Details"
+msgstr "Editați detaliile jocului"
+
+#: data/page.kramo.Cartridges.metainfo.xml.in:52 data/gtk/help-overlay.blp:19
+#: data/gtk/window.blp:543 cartridges/details_dialog.py:279
+#: cartridges/importer/importer.py:319 cartridges/importer/importer.py:369
+msgid "Preferences"
+msgstr "Preferințe"
+
+#: data/gtk/details-dialog.blp:15
+msgid "Cancel"
+msgstr "Anulare"
+
+#: data/gtk/details-dialog.blp:45
+msgid "New Cover"
+msgstr "Copertă nouă"
+
+#: data/gtk/details-dialog.blp:64
+msgid "Delete Cover"
+msgstr "Șterge coperta"
+
+#: data/gtk/details-dialog.blp:92 data/gtk/game.blp:80
+msgid "Title"
+msgstr "Titlu"
+
+#: data/gtk/details-dialog.blp:96
+msgid "Developer (optional)"
+msgstr "Dezvoltator (opțional)"
+
+#: data/gtk/details-dialog.blp:102
+msgid "Executable"
+msgstr "Executabil"
+
+#: data/gtk/details-dialog.blp:108
+msgid "Select File"
+msgstr "Selectare fișier"
+
+#: data/gtk/details-dialog.blp:119
+msgid "More Info"
+msgstr "Mai multe informații"
+
+#: data/gtk/game.blp:101 data/gtk/game.blp:109 data/gtk/window.blp:444
+msgid "Edit"
+msgstr "Editare"
+
+#: data/gtk/game.blp:102 cartridges/window.py:359
+msgid "Hide"
+msgstr "Ascunde"
+
+#: data/gtk/game.blp:103 data/gtk/game.blp:111 data/gtk/window.blp:464
+msgid "Remove"
+msgstr "Elimină"
+
+#: data/gtk/game.blp:110 cartridges/window.py:361
+msgid "Unhide"
+msgstr "Afișează"
+
+#: data/gtk/help-overlay.blp:11 data/gtk/preferences.blp:9
+msgid "General"
+msgstr "General"
+
+#: data/gtk/help-overlay.blp:14 data/gtk/window.blp:207 data/gtk/window.blp:223
+#: data/gtk/window.blp:274 data/gtk/window.blp:290 data/gtk/window.blp:475
+msgid "Search"
+msgstr "Căutare"
+
+#: data/gtk/help-overlay.blp:24 data/gtk/window.blp:544
+msgid "Keyboard Shortcuts"
+msgstr "Taste de comenzi rapide"
+
+#: data/gtk/help-overlay.blp:29 cartridges/game.py:103
+#: cartridges/preferences.py:137 cartridges/importer/importer.py:386
+msgid "Undo"
+msgstr "Anulează"
+
+#: data/gtk/help-overlay.blp:34
+msgid "Quit"
+msgstr "Ieșire"
+
+#: data/gtk/help-overlay.blp:39 data/gtk/window.blp:92 data/gtk/window.blp:187
+msgid "Toggle Sidebar"
+msgstr "Afișează/ascunde bara laterală"
+
+#: data/gtk/help-overlay.blp:44 data/gtk/window.blp:200 data/gtk/window.blp:267
+msgid "Main Menu"
+msgstr "Meniu principal"
+
+#: data/gtk/help-overlay.blp:50
+msgid "Games"
+msgstr "Jocuri"
+
+#: data/gtk/help-overlay.blp:53 data/gtk/window.blp:193 data/gtk/window.blp:551
+msgid "Add Game"
+msgstr "Adăugați joc"
+
+#: data/gtk/help-overlay.blp:58 data/gtk/preferences.blp:58
+#: data/gtk/window.blp:27 data/gtk/window.blp:555
+msgid "Import"
+msgstr "Import"
+
+#: data/gtk/help-overlay.blp:63
+msgid "Show Hidden Games"
+msgstr "Afișează jocurile ascunse"
+
+#: data/gtk/help-overlay.blp:68
+msgid "Remove Game"
+msgstr "Elimină jocul"
+
+#: data/gtk/preferences.blp:13 data/gtk/preferences.blp:62
+#: data/gtk/preferences.blp:365
+msgid "Behavior"
+msgstr "Comportament"
+
+#: data/gtk/preferences.blp:16
+msgid "Exit After Launching Games"
+msgstr "Ieșire din program după lansarea jocurilor"
+
+#: data/gtk/preferences.blp:20
+msgid "Cover Image Launches Game"
+msgstr "Imaginea de copertă lansează jocul"
+
+#: data/gtk/preferences.blp:21
+msgid "Swaps the behavior of the cover image and the play button"
+msgstr ""
+"Interschimbă comportamentul imaginii de copertă și al butonului de redare"
+
+#: data/gtk/preferences.blp:26 cartridges/details_dialog.py:91
+msgid "Images"
+msgstr "Imagini"
+
+#: data/gtk/preferences.blp:29
+msgid "High Quality Images"
+msgstr "Imagini de înaltă calitate"
+
+#: data/gtk/preferences.blp:30
+msgid "Save game covers losslessly at the cost of storage"
+msgstr ""
+"Salvează coperțile jocurilor fără pierderi, dar ocupă mai mult spațiu de "
+"stocare"
+
+#: data/gtk/preferences.blp:35
+msgid "Danger Zone"
+msgstr "Zonă periculoasă"
+
+#: data/gtk/preferences.blp:39
+msgid "Remove All Games"
+msgstr "Elimină toate jocurile"
+
+#: data/gtk/preferences.blp:65
+msgid "Import Games Automatically"
+msgstr "Importă automat jocuri"
+
+#: data/gtk/preferences.blp:69
+msgid "Remove Uninstalled Games"
+msgstr "Elimină jocurile dezinstalate"
+
+#: data/gtk/preferences.blp:74
+msgid "Sources"
+msgstr "Surse"
+
+#: data/gtk/preferences.blp:78 cartridges/importer/steam_source.py:114
+msgid "Steam"
+msgstr "Steam"
+
+#: data/gtk/preferences.blp:87 data/gtk/preferences.blp:114
+#: data/gtk/preferences.blp:149 data/gtk/preferences.blp:192
+#: data/gtk/preferences.blp:219 data/gtk/preferences.blp:246
+#: data/gtk/preferences.blp:273
+msgid "Install Location"
+msgstr "Locația de instalare"
+
+#: data/gtk/preferences.blp:105 data/gtk/window.blp:565
+#: cartridges/importer/lutris_source.py:107
+msgid "Lutris"
+msgstr "Lutris"
+
+#: data/gtk/preferences.blp:131
+msgid "Import Steam Games"
+msgstr "Importă jocuri din Steam"
+
+#: data/gtk/preferences.blp:135
+msgid "Import Flatpak Games"
+msgstr "Importă jocuri din Flatpak"
+
+#: data/gtk/preferences.blp:140 cartridges/importer/heroic_source.py:355
+msgid "Heroic"
+msgstr "Heroic"
+
+#: data/gtk/preferences.blp:166
+msgid "Import Epic Games"
+msgstr "Importă jocuri din Epic"
+
+#: data/gtk/preferences.blp:170
+msgid "Import GOG Games"
+msgstr "Importă jocuri din GOG"
+
+#: data/gtk/preferences.blp:174
+msgid "Import Amazon Games"
+msgstr "Importă jocuri din Amazon"
+
+#: data/gtk/preferences.blp:178
+msgid "Import Sideloaded Games"
+msgstr "Importă jocuri descărcate manual"
+
+#: data/gtk/preferences.blp:183 cartridges/importer/bottles_source.py:86
+msgid "Bottles"
+msgstr "Bottles"
+
+#: data/gtk/preferences.blp:210 cartridges/importer/itch_source.py:81
+msgid "itch"
+msgstr "itch"
+
+#: data/gtk/preferences.blp:237 cartridges/importer/legendary_source.py:97
+msgid "Legendary"
+msgstr "Legendary"
+
+#: data/gtk/preferences.blp:264 cartridges/importer/retroarch_source.py:142
+msgid "RetroArch"
+msgstr "RetroArch"
+
+#: data/gtk/preferences.blp:291 cartridges/importer/flatpak_source.py:143
+msgid "Flatpak"
+msgstr "Flatpak"
+
+#. The location of the system-wide data directory
+#: data/gtk/preferences.blp:301
+msgid "System Location"
+msgstr "Locația directorului de date la nivel de sistem"
+
+#. The location of the user-specific data directory
+#: data/gtk/preferences.blp:319
+msgid "User Location"
+msgstr "Locația directorului de date specific utilizatorului"
+
+#: data/gtk/preferences.blp:336
+msgid "Import Game Launchers"
+msgstr "Importare lansatoare de jocuri"
+
+#: data/gtk/preferences.blp:341 cartridges/importer/desktop_source.py:215
+msgid "Desktop Entries"
+msgstr "Elemente de acces direct, pe birou"
+
+#: data/gtk/preferences.blp:353 data/gtk/window.blp:563
+msgid "SteamGridDB"
+msgstr "SteamGridDB"
+
+#: data/gtk/preferences.blp:357
+msgid "Authentication"
+msgstr "Autentificare"
+
+#: data/gtk/preferences.blp:360
+msgid "API Key"
+msgstr "Cheie API"
+
+#: data/gtk/preferences.blp:368
+msgid "Use SteamGridDB"
+msgstr "Utilizează SteamGridDB"
+
+#: data/gtk/preferences.blp:369
+msgid "Download images when adding or importing games"
+msgstr "Descarcă imagini atunci când se adaugă sau se importă jocuri"
+
+#: data/gtk/preferences.blp:373
+msgid "Prefer Over Official Images"
+msgstr "Preferă mai mult decât imaginile oficiale"
+
+#: data/gtk/preferences.blp:377
+msgid "Prefer Animated Images"
+msgstr "Preferă imaginile animate"
+
+#: data/gtk/preferences.blp:383
+msgid "Update Covers"
+msgstr "Actualizare coperți"
+
+#: data/gtk/preferences.blp:384
+msgid "Fetch covers for games already in your library"
+msgstr "Obține coperți pentru jocurile aflate deja în colecție"
+
+#: data/gtk/preferences.blp:389
+msgid "Update"
+msgstr "Actualizare"
+
+#: data/gtk/window.blp:6 data/gtk/window.blp:14
+msgid "No Games Found"
+msgstr "Nu s-au găsit jocuri"
+
+#: data/gtk/window.blp:7 data/gtk/window.blp:15
+msgid "Try a different search"
+msgstr "Încercați o altă căutare"
+
+#: data/gtk/window.blp:21
+msgid "No Games"
+msgstr "Fără jocuri"
+
+#: data/gtk/window.blp:22
+msgid "Use the + button to add games"
+msgstr "Folosiți butonul + pentru a adăuga jocuri"
+
+#: data/gtk/window.blp:40
+msgid "No Hidden Games"
+msgstr "Fără jocuri ascunse"
+
+#: data/gtk/window.blp:41
+msgid "Games you hide will appear here"
+msgstr "Jocurile pe care le ascundeți vor apărea aici"
+
+#: data/gtk/window.blp:76 data/gtk/window.blp:113 cartridges/main.py:249
+msgid "All Games"
+msgstr "Toate jocurile"
+
+#: data/gtk/window.blp:140 cartridges/main.py:251
+msgid "Added"
+msgstr "Adăugat"
+
+#: data/gtk/window.blp:162
+msgid "Imported"
+msgstr "Importat"
+
+#: data/gtk/window.blp:260
+msgid "Hidden Games"
+msgstr "Jocuri ascunse"
+
+#: data/gtk/window.blp:368
+msgid "Game Title"
+msgstr "Titlul jocului"
+
+#: data/gtk/window.blp:425
+msgid "Play"
+msgstr "Joacă"
+
+#: data/gtk/window.blp:502
+msgid "Sort"
+msgstr "Sortează"
+
+#: data/gtk/window.blp:505
+msgid "A-Z"
+msgstr "A-Z"
+
+#: data/gtk/window.blp:511
+msgid "Z-A"
+msgstr "Z-A"
+
+#: data/gtk/window.blp:517
+msgid "Newest"
+msgstr "Cel mai noi"
+
+#: data/gtk/window.blp:523
+msgid "Oldest"
+msgstr "Cel mai vechi"
+
+#: data/gtk/window.blp:529
+msgid "Last Played"
+msgstr "Jucat ultima dată"
+
+#: data/gtk/window.blp:536
+msgid "Show Hidden"
+msgstr "Afișează pe cele ascunse"
+
+#: data/gtk/window.blp:545
+msgid "About Cartridges"
+msgstr "Despre Cartușe"
+
+#: data/gtk/window.blp:562
+msgid "IGDB"
+msgstr "IGDB"
+
+#: data/gtk/window.blp:564
+msgid "ProtonDB"
+msgstr "ProtonDB"
+
+#: data/gtk/window.blp:566
+msgid "HowLongToBeat"
+msgstr "HowLongToBeat"
+
+#. The variable is the title of the game
+#: cartridges/main.py:226 cartridges/game.py:125
+msgid "{} launched"
+msgstr "{} lansat"
+
+#. Translators: Replace this with Your Name, Your Name <your.email@example.com>, or Your Name https://your-site.com for it to show up in the About dialog.
+#: cartridges/main.py:291
+msgid "translator-credits"
+msgstr ""
+"Matt C <matei.gurzu@gmail.com>,\n"
+"Remus-Gabriel Chelu <remusgabriel.chelu@disroot.org>"
+
+#. The variable is the date when the game was added
+#: cartridges/window.py:382
+msgid "Added: {}"
+msgstr "Adăugat: {}"
+
+#: cartridges/window.py:385
+msgid "Never"
+msgstr "Niciodată"
+
+#. The variable is the date when the game was last played
+#: cartridges/window.py:389
+msgid "Last played: {}"
+msgstr "Jucat ultima dată {}"
+
+#: cartridges/details_dialog.py:82
+msgid "Apply"
+msgstr "Aplică"
+
+#: cartridges/details_dialog.py:88
+msgid "Add New Game"
+msgstr "Adaugă un joc nou"
+
+#: cartridges/details_dialog.py:89
+msgid "Add"
+msgstr "Adaugă"
+
+#: cartridges/details_dialog.py:102
+msgid "Executables"
+msgstr "Executabili"
+
+#. Translate this string as you would translate "file"
+#: cartridges/details_dialog.py:117
+msgid "file.txt"
+msgstr "fișier.txt"
+
+#. As in software
+#: cartridges/details_dialog.py:119
+msgid "program"
+msgstr "program"
+
+#. Translate this string as you would translate "path to {}"
+#: cartridges/details_dialog.py:124 cartridges/details_dialog.py:126
+msgid "C:\\path\\to\\{}"
+msgstr "C:\ruta\\către\\{}"
+
+#. Translate this string as you would translate "path to {}"
+#: cartridges/details_dialog.py:130 cartridges/details_dialog.py:132
+msgid "/path/to/{}"
+msgstr "/ruta/către/{}"
+
+#: cartridges/details_dialog.py:137
+msgid ""
+"To launch the executable \"{}\", use the command:\n"
+"\n"
+"<tt>\"{}\"</tt>\n"
+"\n"
+"To open the file \"{}\" with the default application, use:\n"
+"\n"
+"<tt>{} \"{}\"</tt>\n"
+"\n"
+"If the path contains spaces, make sure to wrap it in double quotes!"
+msgstr ""
+"Pentru a lansa executabilul „{}”, utilizați comanda:\n"
+"\n"
+"<tt>„{}”</tt>\n"
+"\n"
+"Pentru a deschide fișierul „{}” cu aplicația implicită, utilizați:\n"
+"\n"
+"<tt>{} „{}”</tt>\n"
+"\n"
+"Dacă ruta conține spații, asigurați-vă că o includeți între ghilimele duble!"
+
+#: cartridges/details_dialog.py:179 cartridges/details_dialog.py:185
+msgid "Couldn't Add Game"
+msgstr "Nu s-a putut adăuga jocul"
+
+#: cartridges/details_dialog.py:179 cartridges/details_dialog.py:221
+msgid "Game title cannot be empty."
+msgstr "Titlul jocului nu poate fi gol."
+
+#: cartridges/details_dialog.py:185 cartridges/details_dialog.py:229
+msgid "Executable cannot be empty."
+msgstr "Executabilul nu poate fi gol."
+
+#: cartridges/details_dialog.py:220 cartridges/details_dialog.py:228
+msgid "Couldn't Apply Preferences"
+msgstr "Nu s-au putut aplica preferințele"
+
+#. The variable is the title of the game
+#: cartridges/game.py:139
+msgid "{} hidden"
+msgstr "{} ascuns"
+
+#: cartridges/game.py:139
+msgid "{} unhidden"
+msgstr "{} afișat"
+
+#. The variable is the title of the game
+#: cartridges/game.py:153
+msgid "{} removed"
+msgstr "{} eliminat"
+
+#: cartridges/preferences.py:136
+msgid "All games removed"
+msgstr "Toate jocurile au fost eliminate"
+
+#: cartridges/preferences.py:188
+msgid ""
+"An API key is required to use SteamGridDB. You can generate one {}here{}."
+msgstr ""
+"O cheie API este necesară pentru a utiliza SteamGridDB. Puteți genera una {}"
+"aici{}."
+
+#: cartridges/preferences.py:203
+msgid "Downloading covers…"
+msgstr "Se descarcă coperțile…"
+
+#: cartridges/preferences.py:222
+msgid "Covers updated"
+msgstr "Coperți actualizate"
+
+#: cartridges/preferences.py:370
+msgid "Installation Not Found"
+msgstr "Instalarea nu a fost găsită"
+
+#: cartridges/preferences.py:371
+msgid "Select a valid directory"
+msgstr "Selectați un director valid"
+
+#: cartridges/preferences.py:407 cartridges/importer/importer.py:317
+msgid "Warning"
+msgstr "Atenţie"
+
+#: cartridges/preferences.py:441
+msgid "Invalid Directory"
+msgstr "Director nevalid"
+
+#: cartridges/preferences.py:447
+msgid "Set Location"
+msgstr "Stabilește locația"
+
+#: cartridges/utils/create_dialog.py:33 cartridges/importer/importer.py:318
+msgid "Dismiss"
+msgstr "Revocare"
+
+#: cartridges/utils/relative_date.py:30
+msgid "Today"
+msgstr "Astăzi"
+
+#: cartridges/utils/relative_date.py:32
+msgid "Yesterday"
+msgstr "Ieri"
+
+#: cartridges/utils/relative_date.py:36
+msgid "Last Week"
+msgstr "Ultima săptămână"
+
+#: cartridges/utils/relative_date.py:38
+msgid "This Month"
+msgstr "Luna aceasta"
+
+#: cartridges/utils/relative_date.py:40
+msgid "Last Month"
+msgstr "Ultima lună"
+
+#: cartridges/utils/relative_date.py:44
+msgid "Last Year"
+msgstr "Ultimul an"
+
+#: cartridges/importer/importer.py:144
+msgid "Importing Games…"
+msgstr "Se importă jocurile…"
+
+#: cartridges/importer/importer.py:337
+msgid "The following errors occured during import:"
+msgstr "Au apărut următoarele erori în timpul importului:"
+
+#: cartridges/importer/importer.py:366
+msgid "No new games found"
+msgstr "Nu s-au găsit jocuri noi"
+
+#. The variable is the number of games.
+#: cartridges/importer/importer.py:379
+msgid "{} game imported"
+msgid_plural "{} games imported"
+msgstr[0] "{} joc importat"
+msgstr[1] "{} jocuri importate"
+msgstr[2] "{} de jocuri importate"
+
+#. The variable is the number of games. This text comes after "{0} games imported".
+#: cartridges/importer/importer.py:383
+msgid ", {} removed"
+msgid_plural ", {} removed"
+msgstr[0] ", {} eliminat"
+msgstr[1] ", {} eliminate"
+msgstr[2] ", {} de eliminate"
+
+#. The variable is the name of the source
+#: cartridges/importer/location.py:34
+msgid "Select the {} cache directory."
+msgstr "Selectați directorul cache {}."
+
+#. The variable is the name of the source
+#: cartridges/importer/location.py:36
+msgid "Select the {} configuration directory."
+msgstr "Selectați directorul de configurare {}."
+
+#. The variable is the name of the source
+#: cartridges/importer/location.py:38
+msgid "Select the {} data directory."
+msgstr "Selectați directorul de date {}."
+
+#: cartridges/importer/retroarch_source.py:129
+msgid "No RetroArch Core Selected"
+msgstr "Nu este selectat niciun nucleu RetroArch"
+
+#. The variable is a newline separated list of playlists
+#: cartridges/importer/retroarch_source.py:131
+msgid "The following playlists have no default core:"
+msgstr "Următoarele liste de redare nu au un nucleu implicit:"
+
+#: cartridges/importer/retroarch_source.py:133
+msgid "Games with no core selected were not imported"
+msgstr "Jocurile fără un nucleu selectat nu au fost importate"
+
+#: cartridges/store/managers/sgdb_manager.py:46
+msgid "Couldn't Authenticate SteamGridDB"
+msgstr "Nu s-a putut autentifica SteamGridDB"
+
+#: cartridges/store/managers/sgdb_manager.py:47
+msgid "Verify your API key in preferences"
+msgstr "Verificați cheia API în preferințe"
+
+#~ msgid "1 removed"
+#~ msgid_plural "{} removed"
+#~ msgstr[0] "Un joc eliminat"
+#~ msgstr[1] ""
+#~ msgstr[2] ""
+
+#~ msgid "Library"
+#~ msgstr "Bibliotecă"
+
+#~ msgid "Back"
+#~ msgstr "Înapoi"
+
+#, fuzzy
+#~| msgid "Search"
+#~ msgid "Search games"
+#~ msgstr "Căutare"
+
+#, fuzzy
+#~| msgid "No Hidden Games"
+#~ msgid "Search hidden games"
+#~ msgstr "Fără jocuri ascunse"
+
+#~ msgid "Launch your games"
+#~ msgstr "Lansați-vă jocurile"

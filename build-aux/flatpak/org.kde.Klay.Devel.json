@@ -1,0 +1,122 @@
+{
+  "id": "org.kde.Klay.Devel",
+  "runtime": "org.gnome.Platform",
+  "runtime-version": "49",
+  "sdk": "org.gnome.Sdk",
+  "command": "klay",
+  "finish-args": [
+    "--share=network",
+    "--share=ipc",
+    "--socket=fallback-x11",
+    "--device=dri",
+    "--socket=wayland",
+    "--talk-name=org.freedesktop.Flatpak",
+    "--filesystem=host",
+    "--filesystem=~/.var/app/com.valvesoftware.Steam/data/Steam/:ro",
+    "--filesystem=~/.var/app/net.lutris.Lutris/:ro",
+    "--filesystem=~/.var/app/com.heroicgameslauncher.hgl/config/heroic/:ro",
+    "--filesystem=~/.var/app/com.heroicgameslauncher.hgl/config/legendary/:ro",
+    "--filesystem=~/.var/app/com.usebottles.bottles/data/bottles/:ro",
+    "--filesystem=~/.var/app/io.itch.itch/config/itch/:ro",
+    "--filesystem=~/.var/app/org.libretro.RetroArch/config/retroarch/:ro",
+    "--filesystem=/var/lib/flatpak/app:ro",
+    "--filesystem=/var/lib/flatpak/exports:ro",
+    "--filesystem=xdg-data/flatpak/app:ro",
+    "--filesystem=xdg-data/flatpak/exports:ro"
+  ],
+  "cleanup": [
+    "/include",
+    "/lib/pkgconfig",
+    "/man",
+    "/share/doc",
+    "/share/gtk-doc",
+    "/share/man",
+    "/share/pkgconfig",
+    "*.la",
+    "*.a"
+  ],
+  "modules": [
+    {
+      "name": "python3-modules",
+      "buildsystem": "simple",
+      "build-commands": [],
+      "modules": [
+        {
+          "name": "python3-pyyaml",
+          "buildsystem": "simple",
+          "build-commands": [
+            "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"pyyaml\" --no-build-isolation"
+          ],
+          "sources": [
+            {
+              "type": "file",
+              "url": "https://files.pythonhosted.org/packages/54/ed/79a089b6be93607fa5cdaedf301d7dfb23af5f25c398d5ead2525b063e17/pyyaml-6.0.2.tar.gz",
+              "sha256": "d584d9ec91ad65861cc08d42e834324ef890a082e591037abe114850ff7bbc3e"
+            }
+          ]
+        },
+        {
+          "name": "python3-pillow",
+          "buildsystem": "simple",
+          "build-commands": [
+            "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"pillow\" --no-build-isolation"
+          ],
+          "sources": [
+            {
+              "type": "file",
+              "url": "https://files.pythonhosted.org/packages/f3/0d/d0d6dea55cd152ce3d6767bb38a8fc10e33796ba4ba210cbab9354b6d238/pillow-11.3.0.tar.gz",
+              "sha256": "3828ee7586cd0b2091b6209e5ad53e20d0649bbe87164a459d0676e035e8f523"
+            }
+          ]
+        },
+        {
+          "name": "python3-requests",
+          "buildsystem": "simple",
+          "build-commands": [
+            "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"requests\" --no-build-isolation"
+          ],
+          "sources": [
+            {
+              "type": "file",
+              "url": "https://files.pythonhosted.org/packages/e5/48/1549795ba7742c948d2ad169c1c8cdbae65bc450d6cd753d124b17c8cd32/certifi-2025.8.3-py3-none-any.whl",
+              "sha256": "f6c12493cfb1b06ba2ff328595af9350c65d6644968e5d3a2ffd78699af217a5"
+            },
+            {
+              "type": "file",
+              "url": "https://files.pythonhosted.org/packages/83/2d/5fd176ceb9b2fc619e63405525573493ca23441330fcdaee6bef9460e924/charset_normalizer-3.4.3.tar.gz",
+              "sha256": "6fce4b8500244f6fcb71465d4a4930d132ba9ab8e71a7859e6a5d59851068d14"
+            },
+            {
+              "type": "file",
+              "url": "https://files.pythonhosted.org/packages/76/c6/c88e154df9c4e1a2a66ccf0005a88dfb2650c1dffb6f5ce603dfbd452ce3/idna-3.10-py3-none-any.whl",
+              "sha256": "946d195a0d259cbba61165e88e65941f16e9b36ea6ddb97f00452bae8b1287d3"
+            },
+            {
+              "type": "file",
+              "url": "https://files.pythonhosted.org/packages/1e/db/4254e3eabe8020b458f1a747140d32277ec7a271daf1d235b70dc0b4e6e3/requests-2.32.5-py3-none-any.whl",
+              "sha256": "2462f94637a34fd532264295e186976db0f5d453d1cdd31473c85a6a161affb6"
+            },
+            {
+              "type": "file",
+              "url": "https://files.pythonhosted.org/packages/a7/c2/fe1e52489ae3122415c51f387e221dd0773709bad6c6cdaa599e8a2c5185/urllib3-2.5.0-py3-none-any.whl",
+              "sha256": "e6b01673c0fa6a13e374b50871808eb3bf7046c4b125b216f6bf1cc604cff0dc"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "klay",
+      "builddir": true,
+      "buildsystem": "meson",
+      "run-tests": true,
+      "config-opts": ["-Dprofile=development"],
+      "sources": [
+        {
+          "type": "dir",
+          "path": "../.."
+        }
+      ]
+    }
+  ]
+}
