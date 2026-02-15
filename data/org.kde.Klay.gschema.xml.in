@@ -2,6 +2,9 @@
 <schemalist gettext-domain="@GETTEXT_DOMAIN@">
 
   <schema id="@APP_ID@" path="@PREFIX@/">
+    <key name="show-splash" type="b">
+      <default>true</default>
+    </key>
     <key name="auto-import" type="b">
         <default>false</default>
     </key>
@@ -105,6 +108,21 @@
       <default>false</default>
     </key>
     <key name="sgdb-animated" type="b">
+      <default>false</default>
+    </key>
+    <key name="igdb" type="b">
+      <default>false</default>
+    </key>
+    <key name="igdb-client-id" type="s">
+      <default>""</default>
+    </key>
+    <key name="igdb-client-secret" type="s">
+      <default>""</default>
+    </key>
+    <key name="igdb-key" type="s">
+      <default>""</default>
+    </key>
+    <key name="refresh-covers-on-metadata" type="b">
       <default>false</default>
     </key>
     <key name="library-rows" type="u">

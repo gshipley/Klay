@@ -75,6 +75,7 @@ class PreferencesDialog(QDialog):
         tabs.addTab(self._build_sources_page(), "Sources")
         tabs.addTab(self._build_import_page(), "Import")
         tabs.addTab(self._build_sgdb_page(), "SteamGridDB")
+        tabs.addTab(self._build_igdb_page(), "IGDB")
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -104,6 +105,21 @@ class PreferencesDialog(QDialog):
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(10)
 
+        layout.addWidget(
+            self._checkbox(
+                "dark-mode",
+                "Use dark mode",
+                default=GENERAL_BOOL_KEYS["dark-mode"],
+            )
+        )
+        layout.addWidget(
+            self._checkbox(
+                "show-splash",
+                "Show splash screen and startup sound",
+                default=GENERAL_BOOL_KEYS["show-splash"],
+                tooltip="Disable this to start directly into the library without splash or sound.",
+            )
+        )
         layout.addWidget(
             self._checkbox(
                 "auto-import",
@@ -298,12 +314,66 @@ class PreferencesDialog(QDialog):
         layout.addWidget(self.sgdb_prefer_box)
         layout.addWidget(self.sgdb_animated_box)
 
-        self.sgdb_refresh_button = QPushButton("Refresh Metadata & Covers Now")
+        self.sgdb_refresh_button = QPushButton("Refresh Metadata Now")
         self.sgdb_refresh_button.clicked.connect(self._request_refresh)
         layout.addWidget(self.sgdb_refresh_button, alignment=Qt.AlignmentFlag.AlignLeft)
 
         self.sgdb_key_edit.textChanged.connect(self._update_sgdb_state)
         self._update_sgdb_state()
+
+        layout.addStretch(1)
+        return page
+
+    def _build_igdb_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        info = QLabel(
+            "IGDB requires a Twitch app Client ID and either an app access token"
+            " or a Client Secret. If a secret is provided, Klay will fetch the token"
+            " automatically during metadata refresh."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        self.igdb_enabled_box = self._checkbox(
+            "igdb",
+            "Enable IGDB metadata enrichment",
+            default=GENERAL_BOOL_KEYS["igdb"],
+        )
+        layout.addWidget(self.igdb_enabled_box)
+
+        igdb_form = QFormLayout()
+        self.igdb_client_id_edit = self._line_edit("igdb-client-id", default=STRING_KEYS["igdb-client-id"])
+        self.igdb_client_secret_edit = self._line_edit(
+            "igdb-client-secret",
+            default=STRING_KEYS["igdb-client-secret"],
+        )
+        self.igdb_client_secret_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.igdb_key_edit = self._line_edit("igdb-key", default=STRING_KEYS["igdb-key"])
+        self.igdb_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        igdb_form.addRow("Client ID", self.igdb_client_id_edit)
+        igdb_form.addRow("Client Secret", self.igdb_client_secret_edit)
+        igdb_form.addRow("Access Token (optional)", self.igdb_key_edit)
+        layout.addLayout(igdb_form)
+
+        self.igdb_refresh_button = QPushButton("Refresh Metadata Now")
+        self.igdb_refresh_button.clicked.connect(self._request_refresh)
+        layout.addWidget(self.igdb_refresh_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(
+            self._checkbox(
+                "refresh-covers-on-metadata",
+                "Include cover updates during metadata refresh",
+                default=GENERAL_BOOL_KEYS["refresh-covers-on-metadata"],
+            )
+        )
+
+        self.igdb_client_id_edit.textChanged.connect(self._update_igdb_state)
+        self.igdb_client_secret_edit.textChanged.connect(self._update_igdb_state)
+        self.igdb_key_edit.textChanged.connect(self._update_igdb_state)
+        self._update_igdb_state()
 
         layout.addStretch(1)
         return page
@@ -332,8 +402,22 @@ class PreferencesDialog(QDialog):
         # Ensure SGDB lookups are enabled for refreshes initiated from this page.
         if self.sgdb_key_edit.text().strip():
             self.sgdb_enabled_box.setChecked(True)
+        if self.igdb_client_id_edit.text().strip() and (
+            self.igdb_client_secret_edit.text().strip() or self.igdb_key_edit.text().strip()
+        ):
+            self.igdb_enabled_box.setChecked(True)
         self.refresh_requested = True
         self.accept()
+
+    def _update_igdb_state(self) -> None:
+        has_client = bool(self.igdb_client_id_edit.text().strip())
+        has_secret = bool(self.igdb_client_secret_edit.text().strip())
+        has_token = bool(self.igdb_key_edit.text().strip())
+        has_creds = has_client and (has_secret or has_token)
+        self.igdb_enabled_box.setEnabled(has_creds)
+        self.igdb_refresh_button.setEnabled(has_creds)
+        if not has_creds:
+            self.igdb_enabled_box.setChecked(False)
 
     def apply(self) -> None:
         for key, widget in self.bool_widgets.items():
@@ -351,3 +435,9 @@ class PreferencesDialog(QDialog):
             self.settings.set_bool("sgdb", False)
             self.settings.set_bool("sgdb-prefer", False)
             self.settings.set_bool("sgdb-animated", False)
+
+        igdb_client_id = self.igdb_client_id_edit.text().strip()
+        igdb_client_secret = self.igdb_client_secret_edit.text().strip()
+        igdb_token = self.igdb_key_edit.text().strip()
+        if not igdb_client_id or (not igdb_client_secret and not igdb_token):
+            self.settings.set_bool("igdb", False)

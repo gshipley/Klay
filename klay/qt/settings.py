@@ -6,6 +6,8 @@ from typing import Any
 
 
 GENERAL_BOOL_KEYS = {
+    "dark-mode": False,
+    "show-splash": True,
     "auto-import": False,
     "exit-after-launch": False,
     "cover-launches-game": False,
@@ -14,6 +16,8 @@ GENERAL_BOOL_KEYS = {
     "sgdb": False,
     "sgdb-prefer": False,
     "sgdb-animated": False,
+    "igdb": False,
+    "refresh-covers-on-metadata": False,
 }
 
 SOURCE_BOOL_KEYS = {
@@ -50,6 +54,9 @@ STRING_KEYS = {
     "flatpak-system-location": "/var/lib/flatpak/",
     "flatpak-user-location": "~/.local/share/flatpak/",
     "sgdb-key": "",
+    "igdb-client-id": "",
+    "igdb-client-secret": "",
+    "igdb-key": "",
 }
 
 STATE_BOOL_KEYS = {"show-sidebar": False}
@@ -175,4 +182,3 @@ class SettingsBackend:
         if base_source in defaults:
             return self.get_bool(base_source, defaults[base_source])
         return True
-

@@ -10,6 +10,7 @@ import sys
 import tempfile
 import types
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from time import time
 from typing import Any, Callable
@@ -89,6 +90,7 @@ class FakeGame:
             "game_id": "",
             "hidden": False,
             "last_played": 0,
+            "playtime_minutes": None,
             "name": "",
             "removed": False,
             "source": "",
@@ -315,22 +317,103 @@ def _sgdb_cover_url(name: str, api_key: str, animated: bool) -> str | None:
 
 
 def _game_to_data(game: Any) -> dict[str, Any]:
+    def _text(value: Any) -> str | None:
+        text = str(value).strip() if value is not None else ""
+        return text or None
+
+    def _text_list(value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        result: list[str] = []
+        for item in value:
+            text = str(item).strip()
+            if text and text not in result:
+                result.append(text)
+        return result
+
     data = {
         "added": int(getattr(game, "added", int(time()))),
         "blacklisted": bool(getattr(game, "blacklisted", False)),
-        "developer": getattr(game, "developer", None),
+        "developer": _text(getattr(game, "developer", None)),
+        "publisher": _text(getattr(game, "publisher", None)),
+        "genres": _text_list(getattr(game, "genres", [])),
+        "platforms": _text_list(getattr(game, "platforms", [])),
+        "categories": _text_list(getattr(game, "categories", [])),
+        "release_date": _text(getattr(game, "release_date", None)),
+        "summary": _text(getattr(game, "summary", None)),
+        "website": _text(getattr(game, "website", None)),
+        "metacritic_score": getattr(game, "metacritic_score", None),
         "executable": getattr(game, "executable", ""),
         "game_id": str(getattr(game, "game_id", "")),
         "hidden": bool(getattr(game, "hidden", False)),
         "last_played": int(getattr(game, "last_played", 0)),
+        "playtime_minutes": getattr(game, "playtime_minutes", None),
         "name": str(getattr(game, "name", "")),
         "removed": bool(getattr(game, "removed", False)),
         "source": str(getattr(game, "source", "")),
         "version": float(getattr(game, "version", 1.5)),
     }
-    if data["developer"] == "":
-        data["developer"] = None
     return data
+
+
+def _coerce_playtime_minutes(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        minutes = int(round(float(value)))
+    except (TypeError, ValueError):
+        return None
+    if minutes < 0:
+        return None
+    return minutes
+
+
+def _apply_playtime_minutes(target: dict[str, Any], playtime_value: Any) -> bool:
+    minutes = _coerce_playtime_minutes(playtime_value)
+    if minutes is None:
+        return False
+    current = _coerce_playtime_minutes(target.get("playtime_minutes"))
+    if current is not None and current >= minutes:
+        return False
+    target["playtime_minutes"] = minutes
+    return True
+
+
+def _normalize_metadata_fields(data: dict[str, Any]) -> None:
+    def _clean_text(value: Any) -> str | None:
+        text = str(value).strip() if value is not None else ""
+        return text or None
+
+    def _clean_list(value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        cleaned: list[str] = []
+        for item in value:
+            text = str(item).strip()
+            if text and text not in cleaned:
+                cleaned.append(text)
+        return cleaned
+
+    data["developer"] = _clean_text(data.get("developer"))
+    data["publisher"] = _clean_text(data.get("publisher"))
+    data["release_date"] = _clean_text(data.get("release_date"))
+    data["summary"] = _clean_text(data.get("summary"))
+    data["website"] = _clean_text(data.get("website"))
+    metacritic = data.get("metacritic_score")
+    try:
+        data["metacritic_score"] = int(metacritic) if metacritic is not None else None
+    except (TypeError, ValueError):
+        data["metacritic_score"] = None
+    data["genres"] = _clean_list(data.get("genres"))
+    data["platforms"] = _clean_list(data.get("platforms"))
+    categories = _clean_list(data.get("categories"))
+    category_map: dict[str, str] = {}
+    for category in categories:
+        key = category.casefold()
+        if key not in category_map:
+            category_map[key] = category
+    data["categories"] = [category_map[key] for key in sorted(category_map.keys())]
+    data["playtime_minutes"] = _coerce_playtime_minutes(data.get("playtime_minutes"))
 
 
 def _load_existing_games(games_dir: Path) -> dict[str, dict[str, Any]]:
@@ -346,6 +429,7 @@ def _load_existing_games(games_dir: Path) -> dict[str, dict[str, Any]]:
             continue
         game_id = str(data.get("game_id") or game_file.stem)
         data["game_id"] = game_id
+        _normalize_metadata_fields(data)
         games[game_id] = data
     return games
 
@@ -357,13 +441,460 @@ def _source_enabled(settings: SettingsBackend, source_id: str) -> bool:
 def _write_game(games_dir: Path, data: dict[str, Any]) -> None:
     games_dir.mkdir(parents=True, exist_ok=True)
     game_path = games_dir / f"{data['game_id']}.json"
-    game_path.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+    _normalize_metadata_fields(data)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=str(games_dir),
+        prefix=f"{data['game_id']}.",
+        suffix=".tmp",
+        delete=False,
+    ) as open_file:
+        json.dump(data, open_file, sort_keys=True)
+        open_file.flush()
+        os.fsync(open_file.fileno())
+        tmp_path = Path(open_file.name)
+    os.replace(tmp_path, game_path)
+
+
+def _apply_steam_metadata(target: dict[str, Any], online_data: dict[str, Any]) -> bool:
+    changed = False
+
+    def _set_text(key: str) -> None:
+        nonlocal changed
+        value = online_data.get(key)
+        text = str(value).strip() if value is not None else ""
+        if not text:
+            return
+        if target.get(key) != text:
+            target[key] = text
+            changed = True
+
+    def _set_list(key: str) -> None:
+        nonlocal changed
+        value = online_data.get(key)
+        if not isinstance(value, list):
+            return
+        normalized = [str(item).strip() for item in value if str(item).strip()]
+        normalized = list(dict.fromkeys(normalized))
+        if not normalized:
+            return
+        if target.get(key) != normalized:
+            target[key] = normalized
+            changed = True
+
+    _set_text("developer")
+    _set_text("publisher")
+    _set_text("release_date")
+    _set_text("summary")
+    _set_text("website")
+    _set_list("genres")
+    _set_list("platforms")
+    metacritic_score = online_data.get("metacritic_score")
+    if metacritic_score is not None:
+        try:
+            score = int(metacritic_score)
+        except (TypeError, ValueError):
+            score = None
+        if score is not None and target.get("metacritic_score") != score:
+            target["metacritic_score"] = score
+            changed = True
+    return changed
+
+
+def _igdb_headers(settings: SettingsBackend) -> dict[str, str] | None:
+    return _igdb_headers_with_refresh(settings=settings, errors=[], force_refresh=False)
+
+
+def _igdb_headers_with_refresh(
+    *,
+    settings: SettingsBackend,
+    errors: list[str],
+    force_refresh: bool = False,
+) -> dict[str, str] | None:
+    client_id = settings.get_string("igdb-client-id", "").strip()
+    if not client_id:
+        return None
+
+    token = "" if force_refresh else settings.get_string("igdb-key", "").strip()
+    if not token:
+        token = _igdb_request_token(settings=settings, errors=errors)
+    if not token:
+        return None
+
+    return {
+        "Client-ID": client_id,
+        "Authorization": f"Bearer {token}",
+    }
+
+
+def _igdb_request_token(*, settings: SettingsBackend, errors: list[str]) -> str | None:
+    if requests is None:
+        return None
+
+    client_id = settings.get_string("igdb-client-id", "").strip()
+    client_secret = settings.get_string("igdb-client-secret", "").strip()
+    if not client_id or not client_secret:
+        return None
+
+    try:
+        response = requests.post(
+            "https://id.twitch.tv/oauth2/token",
+            params={
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "grant_type": "client_credentials",
+            },
+            timeout=7,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as error:  # pylint: disable=broad-exception-caught
+        message = f"IGDB token request failed: {type(error).__name__}: {error}"
+        if message not in errors:
+            errors.append(message)
+        return None
+
+    token = str(payload.get("access_token") or "").strip()
+    if not token:
+        message = "IGDB token request returned no access token."
+        if message not in errors:
+            errors.append(message)
+        return None
+
+    settings.set_string("igdb-key", token)
+    return token
+
+
+def _igdb_to_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+
+    summary = str(payload.get("summary") or "").strip()
+    storyline = str(payload.get("storyline") or "").strip()
+    if summary or storyline:
+        result["summary"] = summary or storyline
+
+    url = str(payload.get("url") or "").strip()
+    if url:
+        result["igdb_url"] = url
+
+    website = ""
+    websites = payload.get("websites")
+    if isinstance(websites, list):
+        for item in websites:
+            if not isinstance(item, dict):
+                continue
+            website = str(item.get("url") or "").strip()
+            if website:
+                break
+    if website:
+        result["website"] = website
+
+    rating = payload.get("rating")
+    if rating is not None:
+        try:
+            result["igdb_rating"] = round(float(rating), 1)
+        except (TypeError, ValueError):
+            pass
+
+    release_epoch = payload.get("first_release_date")
+    if release_epoch is not None:
+        try:
+            release_dt = datetime.fromtimestamp(int(release_epoch), tz=timezone.utc)
+            result["release_date"] = release_dt.strftime("%b %d, %Y")
+        except (TypeError, ValueError, OSError):
+            pass
+
+    genres: list[str] = []
+    for item in payload.get("genres") or []:
+        if isinstance(item, dict):
+            text = str(item.get("name") or "").strip()
+            if text and text not in genres:
+                genres.append(text)
+    if genres:
+        result["genres"] = genres
+
+    platforms: list[str] = []
+    for item in payload.get("platforms") or []:
+        if isinstance(item, dict):
+            text = str(item.get("name") or "").strip()
+            if text and text not in platforms:
+                platforms.append(text)
+    if platforms:
+        result["platforms"] = platforms
+
+    developers: list[str] = []
+    publishers: list[str] = []
+    for item in payload.get("involved_companies") or []:
+        if not isinstance(item, dict):
+            continue
+        company = item.get("company") or {}
+        if not isinstance(company, dict):
+            continue
+        name = str(company.get("name") or "").strip()
+        if not name:
+            continue
+        if bool(item.get("developer")) and name not in developers:
+            developers.append(name)
+        if bool(item.get("publisher")) and name not in publishers:
+            publishers.append(name)
+    if developers:
+        result["developer"] = ", ".join(developers)
+    if publishers:
+        result["publisher"] = ", ".join(publishers)
+
+    return result
+
+
+def _resolve_igdb_metadata(
+    *,
+    settings: SettingsBackend,
+    game_name: str,
+    cache: dict[str, dict[str, Any] | None],
+    errors: list[str],
+    game_id: str,
+) -> dict[str, Any] | None:
+    if requests is None:
+        return None
+    headers = _igdb_headers_with_refresh(settings=settings, errors=errors, force_refresh=False)
+    if headers is None:
+        return None
+    if "__igdb_auth_failed__" in cache:
+        return None
+
+    key = game_name.strip().lower()
+    if not key:
+        return None
+    if key in cache:
+        return cache[key]
+
+    safe_name = game_name.replace('"', "").strip()
+    query = (
+        f'search "{safe_name}"; '
+        "fields name,summary,storyline,url,rating,first_release_date,"
+        "genres.name,platforms.name,involved_companies.developer,"
+        "involved_companies.publisher,involved_companies.company.name,websites.url; "
+        "limit 1;"
+    )
+    try:
+        response = requests.post(
+            "https://api.igdb.com/v4/games",
+            data=query.encode("utf-8"),
+            headers=headers,
+            timeout=7,
+        )
+        if response.status_code in {401, 403}:
+            refreshed_headers = _igdb_headers_with_refresh(
+                settings=settings,
+                errors=errors,
+                force_refresh=True,
+            )
+            if refreshed_headers is not None:
+                response = requests.post(
+                    "https://api.igdb.com/v4/games",
+                    data=query.encode("utf-8"),
+                    headers=refreshed_headers,
+                    timeout=7,
+                )
+        if response.status_code in {401, 403}:
+            if "__igdb_auth_failed__" not in cache:
+                errors.append(
+                    "IGDB authorization failed (401/403). Update IGDB Client ID and Client Secret in Preferences."
+                )
+                cache["__igdb_auth_failed__"] = {}
+            cache[key] = None
+            return None
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as error:  # pylint: disable=broad-exception-caught
+        errors.append(f"IGDB lookup failed for {game_id}: {type(error).__name__}: {error}")
+        cache[key] = None
+        return None
+
+    if not isinstance(payload, list) or not payload:
+        cache[key] = None
+        return None
+
+    first = payload[0] if isinstance(payload[0], dict) else {}
+    metadata = _igdb_to_metadata(first)
+    cache[key] = metadata or None
+    return cache[key]
+
+
+def _resolve_igdb_cover_url(
+    *,
+    settings: SettingsBackend,
+    game_name: str,
+    cache: dict[str, str | None],
+    errors: list[str],
+    game_id: str,
+) -> str | None:
+    if requests is None:
+        return None
+    if "__igdb_auth_failed__" in cache:
+        return None
+
+    key = game_name.strip().lower()
+    if not key:
+        return None
+    if key in cache:
+        return cache[key]
+
+    headers = _igdb_headers_with_refresh(settings=settings, errors=errors, force_refresh=False)
+    if headers is None:
+        cache[key] = None
+        return None
+
+    safe_name = game_name.replace('"', "").strip()
+    query = (
+        f'search "{safe_name}"; '
+        "fields name,cover.image_id,cover.animated; "
+        "limit 5;"
+    )
+    try:
+        response = requests.post(
+            "https://api.igdb.com/v4/games",
+            data=query.encode("utf-8"),
+            headers=headers,
+            timeout=7,
+        )
+        if response.status_code in {401, 403}:
+            refreshed_headers = _igdb_headers_with_refresh(
+                settings=settings,
+                errors=errors,
+                force_refresh=True,
+            )
+            if refreshed_headers is not None:
+                response = requests.post(
+                    "https://api.igdb.com/v4/games",
+                    data=query.encode("utf-8"),
+                    headers=refreshed_headers,
+                    timeout=7,
+                )
+        if response.status_code in {401, 403}:
+            if "__igdb_auth_failed__" not in cache:
+                errors.append(
+                    "IGDB authorization failed (401/403). Update IGDB Client ID and Client Secret in Preferences."
+                )
+                cache["__igdb_auth_failed__"] = None
+            cache[key] = None
+            return None
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as error:  # pylint: disable=broad-exception-caught
+        errors.append(f"IGDB cover lookup failed for {game_id}: {type(error).__name__}: {error}")
+        cache[key] = None
+        return None
+
+    if not isinstance(payload, list):
+        cache[key] = None
+        return None
+
+    for row in payload:
+        if not isinstance(row, dict):
+            continue
+        cover = row.get("cover")
+        if not isinstance(cover, dict):
+            continue
+        image_id = str(cover.get("image_id") or "").strip()
+        if not image_id:
+            continue
+        animated = bool(cover.get("animated"))
+        ext = "gif" if animated else "jpg"
+        url = f"https://images.igdb.com/igdb/image/upload/t_1080p/{image_id}.{ext}"
+        cache[key] = url
+        return url
+
+    cache[key] = None
+    return None
+
+
+def _apply_igdb_metadata(target: dict[str, Any], online_data: dict[str, Any]) -> bool:
+    changed = False
+    for key, value in online_data.items():
+        if value in (None, "", []):
+            continue
+        if target.get(key) != value:
+            target[key] = value
+            changed = True
+    return changed
+
+
+def _resolve_steam_online_data(
+    *,
+    steam_api_helper: Any,
+    steam_appid: Any,
+    game_name: str,
+    cache: dict[str, dict[str, Any] | None],
+    errors: list[str],
+    game_id: str,
+    allow_name_search: bool = False,
+) -> dict[str, Any] | None:
+    if steam_api_helper is None:
+        return None
+
+    appid: str | None = None
+    if steam_appid is not None:
+        appid = str(steam_appid).strip() or None
+
+    if appid is None and allow_name_search:
+        name_key = game_name.strip().lower()
+        if name_key:
+            cached = cache.get(f"name:{name_key}")
+            if cached is not None:
+                return cached
+            try:
+                appids = steam_api_helper.search_appids(game_name, limit=3)
+            except Exception as error:  # pylint: disable=broad-exception-caught
+                errors.append(
+                    f"Steam search failed for {game_id}: {type(error).__name__}: {error}"
+                )
+                cache[f"name:{name_key}"] = None
+                return None
+            appid = appids[0] if appids else None
+            if appid is None:
+                cache[f"name:{name_key}"] = None
+                return None
+
+    cache_key = f"appid:{appid}"
+    if cache_key in cache:
+        return cache[cache_key]
+
+    try:
+        online_data = steam_api_helper.get_api_data(appid=appid)
+    except Exception as error:  # pylint: disable=broad-exception-caught
+        error_name = type(error).__name__
+        if error_name in {"SteamNotAGameError", "SteamGameNotFoundError"}:
+            cache[cache_key] = None
+            return None
+        errors.append(f"Steam API failed for {game_id}: {error_name}: {error}")
+        cache[cache_key] = None
+        return None
+
+    cache[cache_key] = dict(online_data)
+    return cache[cache_key]
+
+
+def _needs_online_metadata(game_data: dict[str, Any]) -> bool:
+    # Skip expensive network calls when local metadata is already populated.
+    if not str(game_data.get("developer") or "").strip():
+        return True
+    if not str(game_data.get("publisher") or "").strip():
+        return True
+    if not isinstance(game_data.get("genres"), list) or not game_data.get("genres"):
+        return True
+    if not isinstance(game_data.get("platforms"), list) or not game_data.get("platforms"):
+        return True
+    if not str(game_data.get("release_date") or "").strip():
+        return True
+    if not str(game_data.get("summary") or "").strip():
+        return True
+    return False
 
 
 def _has_cover(covers_dir: Path, game_id: str) -> bool:
-    # TIFF is intentionally ignored for detection because Qt deployments may
-    # not ship TIFF image plugins; PNG/GIF/JPEG/WebP are used for UI reliability.
-    for suffix in ("gif", "png", "jpg", "jpeg", "webp"):
+    # Preserve any known local cover format during importer runs.
+    for suffix in ("gif", "png", "jpg", "jpeg", "webp", "tiff"):
         if (covers_dir / f"{game_id}.{suffix}").is_file():
             return True
     return False
@@ -390,10 +921,28 @@ def _attempt_cover_update(
     settings: SettingsBackend,
     sgdb_cache: dict[tuple[str, bool], str | None],
     sgdb_state: dict[str, int | bool],
+    igdb_cover_cache: dict[str, str | None],
     errors: list[str],
+    allow_network_enrichment: bool = True,
+    preserve_existing_cover: bool = False,
 ) -> tuple[bool, bool]:
     had_cover_before = _has_cover(covers_dir, game_id)
+    if preserve_existing_cover and had_cover_before:
+        return False, had_cover_before
+
     cover_updated = False
+    use_sgdb = allow_network_enrichment and settings.get_bool("sgdb", False)
+    use_igdb = allow_network_enrichment and settings.get_bool("igdb", False)
+    prefer_sgdb = settings.get_bool("sgdb-prefer", False)
+
+    if (
+        not additional_data.get("local_image_path")
+        and not additional_data.get("local_icon_path")
+        and (not allow_network_enrichment or not additional_data.get("online_cover_url"))
+        and (not use_sgdb or (had_cover_before and not prefer_sgdb))
+        and (not use_igdb or had_cover_before)
+    ):
+        return False, had_cover_before
 
     if path := additional_data.get("local_image_path"):
         cover_updated = _save_cover_from_path(
@@ -409,7 +958,7 @@ def _attempt_cover_update(
             game_id=game_id,
             icon_mode=True,
         )
-    elif url := additional_data.get("online_cover_url"):
+    elif allow_network_enrichment and (url := additional_data.get("online_cover_url")):
         if tmp_file := _download_to_temp(str(url)):
             try:
                 cover_updated = _save_cover_from_path(
@@ -421,8 +970,6 @@ def _attempt_cover_update(
             finally:
                 tmp_file.unlink(missing_ok=True)
 
-    use_sgdb = settings.get_bool("sgdb", False)
-    prefer_sgdb = settings.get_bool("sgdb-prefer", False)
     if (
         use_sgdb
         and not blacklisted
@@ -438,6 +985,31 @@ def _attempt_cover_update(
             errors=errors,
         )
         if sgdb_url and (tmp_file := _download_to_temp(sgdb_url)):
+            try:
+                cover_updated = _save_cover_from_path(
+                    cover_path=tmp_file,
+                    covers_dir=covers_dir,
+                    game_id=game_id,
+                    icon_mode=False,
+                )
+            finally:
+                tmp_file.unlink(missing_ok=True)
+
+    if (
+        not cover_updated
+        and use_igdb
+        and allow_network_enrichment
+        and not blacklisted
+        and not _has_cover(covers_dir, game_id)
+    ):
+        igdb_url = _resolve_igdb_cover_url(
+            settings=settings,
+            game_name=game_name,
+            cache=igdb_cover_cache,
+            errors=errors,
+            game_id=game_id,
+        )
+        if igdb_url and (tmp_file := _download_to_temp(igdb_url)):
             try:
                 cover_updated = _save_cover_from_path(
                     cover_path=tmp_file,
@@ -538,9 +1110,26 @@ def _refresh_metadata_and_covers(
     errors = summary.errors or []
     sgdb_cache: dict[tuple[str, bool], str | None] = {}
     sgdb_state: dict[str, int | bool] = {"network_failures": 0, "disabled": False}
+    steam_cache: dict[str, dict[str, Any] | None] = {}
+    igdb_cache: dict[str, dict[str, Any] | None] = {}
+    igdb_cover_cache: dict[str, str | None] = {}
+    refresh_covers = settings.get_bool("refresh-covers-on-metadata", False)
 
-    if settings.get_bool("sgdb", False) and not settings.get_string("sgdb-key", "").strip():
+    if (
+        refresh_covers
+        and settings.get_bool("sgdb", False)
+        and not settings.get_string("sgdb-key", "").strip()
+    ):
         errors.append("SteamGridDB is enabled but no API key is set.")
+    if settings.get_bool("igdb", False):
+        if not settings.get_string("igdb-client-id", "").strip():
+            errors.append("IGDB is enabled but Client ID is not set.")
+        has_token = bool(settings.get_string("igdb-key", "").strip())
+        has_secret = bool(settings.get_string("igdb-client-secret", "").strip())
+        if not has_token and not has_secret:
+            errors.append(
+                "IGDB is enabled but neither access token nor Client Secret is set."
+            )
 
     candidates: list[tuple[str, dict[str, Any]]] = [
         (game_id, game_data)
@@ -571,34 +1160,40 @@ def _refresh_metadata_and_covers(
         summary.scanned += 1
         updated = False
 
-        if (
-            not skipped
-            and steam_api_helper
-            and (steam_appid := _steam_appid_from_game_data(game_data))
-        ):
-            try:
-                online_data = steam_api_helper.get_api_data(appid=str(steam_appid))
-            except Exception as error:  # pylint: disable=broad-exception-caught
-                error_name = type(error).__name__
-                if error_name in {"SteamNotAGameError", "SteamGameNotFoundError"}:
-                    if not game_data.get("blacklisted", False):
-                        game_data["blacklisted"] = True
-                        updated = True
-                        summary.metadata_updates += 1
-                else:
-                    errors.append(
-                        f"Steam API failed for {game_id}: {type(error).__name__}: {error}"
-                    )
-            else:
-                developer = online_data.get("developer")
-                if developer and developer != game_data.get("developer"):
-                    game_data["developer"] = developer
+        if not skipped and steam_api_helper and _needs_online_metadata(game_data):
+            online_data = _resolve_steam_online_data(
+                steam_api_helper=steam_api_helper,
+                steam_appid=_steam_appid_from_game_data(game_data),
+                game_name=str(game_data.get("name", game_id)),
+                cache=steam_cache,
+                errors=errors,
+                game_id=game_id,
+                allow_name_search=True,
+            )
+            if online_data is None and _steam_appid_from_game_data(game_data) is not None:
+                if not game_data.get("blacklisted", False):
+                    game_data["blacklisted"] = True
                     updated = True
                     summary.metadata_updates += 1
+            elif online_data and _apply_steam_metadata(game_data, online_data):
+                updated = True
+                summary.metadata_updates += 1
+
+        if not skipped and settings.get_bool("igdb", False):
+            igdb_data = _resolve_igdb_metadata(
+                settings=settings,
+                game_name=str(game_data.get("name", game_id)),
+                cache=igdb_cache,
+                errors=errors,
+                game_id=game_id,
+            )
+            if igdb_data and _apply_igdb_metadata(game_data, igdb_data):
+                updated = True
+                summary.metadata_updates += 1
 
         cover_updated = False
         had_cover_before = _has_cover(covers_dir, game_id)
-        if not skipped:
+        if not skipped and refresh_covers:
             cover_updated, had_cover_before = _attempt_cover_update(
                 game_id=game_id,
                 game_name=str(game_data.get("name", game_id)),
@@ -608,7 +1203,9 @@ def _refresh_metadata_and_covers(
                 settings=settings,
                 sgdb_cache=sgdb_cache,
                 sgdb_state=sgdb_state,
+                igdb_cover_cache=igdb_cover_cache,
                 errors=errors,
+                preserve_existing_cover=True,
             )
 
         if cover_updated:
@@ -656,6 +1253,7 @@ def _run_import() -> dict[str, Any]:
     imported_ids = summary.imported_ids if summary.imported_ids is not None else []
     removed_ids = summary.removed_ids if summary.removed_ids is not None else []
     import_mode = os.getenv("KLAY_IMPORT_MODE", "import").strip().lower()
+    fast_mode = os.getenv("KLAY_IMPORT_FAST", "0").strip() == "1"
 
     data_dir_name = os.getenv("KLAY_DATA_DIR_NAME", "klay")
     settings = SettingsBackend(data_dir_name)
@@ -684,12 +1282,13 @@ def _run_import() -> dict[str, Any]:
     shared.covers_dir.mkdir(parents=True, exist_ok=True)
 
     steam_api_helper = None
-    try:
-        from klay.utils.steam import SteamAPIHelper, SteamRateLimiter
+    if not (fast_mode and import_mode == "import"):
+        try:
+            from klay.utils.steam import SteamAPIHelper, SteamRateLimiter
 
-        steam_api_helper = SteamAPIHelper(SteamRateLimiter())
-    except Exception as error:  # pylint: disable=broad-exception-caught
-        errors.append(f"Steam API helper unavailable: {type(error).__name__}: {error}")
+            steam_api_helper = SteamAPIHelper(SteamRateLimiter())
+        except Exception as error:  # pylint: disable=broad-exception-caught
+            errors.append(f"Steam API helper unavailable: {type(error).__name__}: {error}")
 
     existing_games = _load_existing_games(shared.games_dir)
 
@@ -711,6 +1310,9 @@ def _run_import() -> dict[str, Any]:
     source_classes = _load_source_classes(errors)
     sgdb_cache: dict[tuple[str, bool], str | None] = {}
     sgdb_state: dict[str, int | bool] = {"network_failures": 0, "disabled": False}
+    steam_cache: dict[str, dict[str, Any] | None] = {}
+    igdb_cache: dict[str, dict[str, Any] | None] = {}
+    igdb_cover_cache: dict[str, str | None] = {}
     seen_ids: set[str] = set()
     scanned_ids: set[str] = set()
     emit_start_done = False
@@ -800,25 +1402,40 @@ def _run_import() -> dict[str, Any]:
                 summary.duplicates += 1
                 metadata_updated = False
 
-                steam_appid = additional_data.get("steam_appid")
-                if steam_api_helper and steam_appid is not None:
-                    try:
-                        online_data = steam_api_helper.get_api_data(appid=str(steam_appid))
-                    except Exception as error:  # pylint: disable=broad-exception-caught
-                        error_name = type(error).__name__
-                        if error_name in {"SteamNotAGameError", "SteamGameNotFoundError"}:
-                            if not existing.get("blacklisted", False):
-                                existing["blacklisted"] = True
-                                metadata_updated = True
-                        else:
-                            errors.append(
-                                f"Steam API failed for {game_id}: {type(error).__name__}: {error}"
-                            )
-                    else:
-                        developer = online_data.get("developer")
-                        if developer and developer != existing.get("developer"):
-                            existing["developer"] = developer
+                if steam_api_helper and _needs_online_metadata(existing):
+                    online_data = _resolve_steam_online_data(
+                        steam_api_helper=steam_api_helper,
+                        steam_appid=additional_data.get("steam_appid"),
+                        game_name=str(existing.get("name", game_data["name"])),
+                        cache=steam_cache,
+                        errors=errors,
+                        game_id=game_id,
+                        allow_name_search=False,
+                    )
+                    if online_data is None and additional_data.get("steam_appid") is not None:
+                        if not existing.get("blacklisted", False):
+                            existing["blacklisted"] = True
                             metadata_updated = True
+                    elif online_data and _apply_steam_metadata(existing, online_data):
+                        metadata_updated = True
+
+                if (
+                    (not fast_mode)
+                    and settings.get_bool("igdb", False)
+                    and _needs_online_metadata(existing)
+                ):
+                    igdb_data = _resolve_igdb_metadata(
+                        settings=settings,
+                        game_name=str(existing.get("name", game_data["name"])),
+                        cache=igdb_cache,
+                        errors=errors,
+                        game_id=game_id,
+                    )
+                    if igdb_data and _apply_igdb_metadata(existing, igdb_data):
+                        metadata_updated = True
+
+                if _apply_playtime_minutes(existing, additional_data.get("playtime_minutes")):
+                    metadata_updated = True
 
                 cover_updated, had_cover_before = _attempt_cover_update(
                     game_id=game_id,
@@ -829,7 +1446,10 @@ def _run_import() -> dict[str, Any]:
                     settings=settings,
                     sgdb_cache=sgdb_cache,
                     sgdb_state=sgdb_state,
+                    igdb_cover_cache=igdb_cover_cache,
                     errors=errors,
+                    allow_network_enrichment=not fast_mode,
+                    preserve_existing_cover=True,
                 )
 
                 if cover_updated:
@@ -865,24 +1485,39 @@ def _run_import() -> dict[str, Any]:
                 game_data["hidden"] = bool(existing.get("hidden", False))
                 game_data["removed"] = False
                 game_data["added"] = int(existing.get("added", game_data["added"]))
+                game_data["categories"] = list(existing.get("categories", []) or [])
 
-            steam_appid = additional_data.get("steam_appid")
-            if steam_api_helper and steam_appid is not None:
-                try:
-                    online_data = steam_api_helper.get_api_data(appid=str(steam_appid))
-                except Exception as error:  # pylint: disable=broad-exception-caught
-                    error_name = type(error).__name__
-                    if error_name in {"SteamNotAGameError", "SteamGameNotFoundError"}:
-                        game_data["blacklisted"] = True
-                    else:
-                        errors.append(
-                            f"Steam API failed for {game_id}: {type(error).__name__}: {error}"
-                        )
-                else:
-                    developer = online_data.get("developer")
-                    if developer:
-                        game_data["developer"] = developer
+            if steam_api_helper:
+                online_data = _resolve_steam_online_data(
+                    steam_api_helper=steam_api_helper,
+                    steam_appid=additional_data.get("steam_appid"),
+                    game_name=game_data["name"],
+                    cache=steam_cache,
+                    errors=errors,
+                    game_id=game_id,
+                    allow_name_search=False,
+                )
+                if online_data is None and additional_data.get("steam_appid") is not None:
+                    game_data["blacklisted"] = True
+                elif online_data:
+                    _apply_steam_metadata(game_data, online_data)
 
+            if (
+                (not fast_mode)
+                and settings.get_bool("igdb", False)
+                and _needs_online_metadata(game_data)
+            ):
+                igdb_data = _resolve_igdb_metadata(
+                    settings=settings,
+                    game_name=game_data["name"],
+                    cache=igdb_cache,
+                    errors=errors,
+                    game_id=game_id,
+                )
+                if igdb_data:
+                    _apply_igdb_metadata(game_data, igdb_data)
+
+            _apply_playtime_minutes(game_data, additional_data.get("playtime_minutes"))
             _write_game(shared.games_dir, game_data)
             imported_ids.append(game_id)
             summary.imported += 1
@@ -896,7 +1531,10 @@ def _run_import() -> dict[str, Any]:
                 settings=settings,
                 sgdb_cache=sgdb_cache,
                 sgdb_state=sgdb_state,
+                igdb_cover_cache=igdb_cover_cache,
                 errors=errors,
+                allow_network_enrichment=not fast_mode,
+                preserve_existing_cover=True,
             )
 
             if cover_updated:

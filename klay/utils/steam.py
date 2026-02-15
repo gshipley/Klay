@@ -22,7 +22,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 import requests
 from requests.exceptions import HTTPError
@@ -59,6 +59,13 @@ class SteamAPIData(TypedDict):
     """Dict returned by SteamAPIHelper.get_api_data"""
 
     developer: str
+    publisher: NotRequired[str]
+    genres: NotRequired[list[str]]
+    platforms: NotRequired[list[str]]
+    release_date: NotRequired[str]
+    summary: NotRequired[str]
+    website: NotRequired[str]
+    metacritic_score: NotRequired[int]
 
 
 class SteamRateLimiter(RateLimiter):
@@ -153,6 +160,67 @@ class SteamAPIHelper:
             logging.debug("Appid %s is not a game", appid)
             raise SteamNotAGameError()
 
+        app_data = data["data"]
+
         # Return API values we're interested in
-        values = SteamAPIData(developer=", ".join(data["data"]["developers"]))
+        developers = app_data.get("developers") or []
+        publishers = app_data.get("publishers") or []
+        genres = [
+            str(item.get("description", "")).strip()
+            for item in (app_data.get("genres") or [])
+            if isinstance(item, dict) and str(item.get("description", "")).strip()
+        ]
+        platforms_data = app_data.get("platforms") or {}
+        platforms = [
+            platform
+            for platform in ("windows", "mac", "linux")
+            if bool(platforms_data.get(platform))
+        ]
+        release_data = app_data.get("release_date") or {}
+        release_date = str(release_data.get("date") or "").strip()
+        summary = str(app_data.get("short_description") or "").strip()
+        website = str(app_data.get("website") or "").strip()
+        metacritic_data = app_data.get("metacritic") or {}
+        metacritic_score = metacritic_data.get("score")
+
+        values = SteamAPIData(developer=", ".join(developers))
+        if publishers:
+            values["publisher"] = ", ".join(str(item) for item in publishers if str(item).strip())
+        if genres:
+            values["genres"] = genres
+        if platforms:
+            values["platforms"] = platforms
+        if release_date:
+            values["release_date"] = release_date
+        if summary:
+            values["summary"] = summary
+        if website:
+            values["website"] = website
+        if metacritic_score is not None:
+            try:
+                values["metacritic_score"] = int(metacritic_score)
+            except (TypeError, ValueError):
+                pass
         return values
+
+    def search_appids(self, term: str, limit: int = 5) -> list[str]:
+        query = term.strip()
+        if not query:
+            return []
+        with self.rate_limiter:
+            with requests.get(
+                f"{self.base_url}/storesearch/?term={requests.utils.quote(query)}&l=english&cc=us",
+                timeout=5,
+            ) as response:
+                response.raise_for_status()
+                payload = response.json()
+        items = payload.get("items", [])
+        results: list[str] = []
+        for item in items[: max(1, int(limit))]:
+            appid = item.get("id")
+            if appid is None:
+                continue
+            appid_text = str(appid).strip()
+            if appid_text:
+                results.append(appid_text)
+        return results

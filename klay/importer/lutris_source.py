@@ -34,6 +34,15 @@ class LutrisSourceIterable(SourceIterable):
     def __iter__(self):
         """Generator method producing games"""
 
+        def _playtime_to_minutes(value):
+            try:
+                hours = float(value)
+            except (TypeError, ValueError):
+                return None
+            if hours <= 0:
+                return None
+            return int(round(hours * 60))
+
         # Query the database
         request = """
             SELECT
@@ -41,7 +50,8 @@ class LutrisSourceIterable(SourceIterable):
                 games.name,
                 games.slug,
                 games.runner,
-                categories.name = ".hidden" as hidden
+                categories.name = ".hidden" as hidden,
+                {playtime_expr} as playtime
             FROM
                 games
             LEFT JOIN
@@ -64,7 +74,16 @@ class LutrisSourceIterable(SourceIterable):
         }
         db_path = copy_db(self.source.locations.data["pga.db"])
         connection = connect(db_path)
-        cursor = connection.execute(request, params)
+        try:
+            columns = {
+                str(row[1]).lower()
+                for row in connection.execute("PRAGMA table_info(games)")
+                if len(row) > 1
+            }
+        except Exception:
+            columns = set()
+        playtime_expr = "games.playtime" if "playtime" in columns else "NULL"
+        cursor = connection.execute(request.format(playtime_expr=playtime_expr), params)
         coverart_is_dir = (
             coverart_path := self.source.locations.data.root / "coverart"
         ).is_dir()
@@ -84,6 +103,8 @@ class LutrisSourceIterable(SourceIterable):
             }
             game = Game(values)
             additional_data = {}
+            if (playtime_minutes := _playtime_to_minutes(row[5])) is not None:
+                additional_data["playtime_minutes"] = playtime_minutes
 
             # Get official image path
             if coverart_is_dir:

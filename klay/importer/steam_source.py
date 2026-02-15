@@ -33,6 +33,84 @@ from klay.utils.steam import SteamFileHelper, SteamInvalidManifestError
 class SteamSourceIterable(SourceIterable):
     source: "SteamSource"
 
+    _playtime_cache: dict[str, int] | None = None
+
+    @staticmethod
+    def _parse_localconfig_playtimes(contents: str) -> dict[str, int]:
+        token_re = re.compile(r'"([^"\n]*)"|([{}])')
+        stack: list[str] = []
+        pending_key: str | None = None
+        playtimes: dict[str, int] = {}
+
+        def _current_appid() -> str | None:
+            if len(stack) >= 2 and stack[-2].lower() == "apps" and stack[-1].isdigit():
+                return stack[-1]
+            return None
+
+        for match in token_re.finditer(contents):
+            quoted = match.group(1)
+            brace = match.group(2)
+
+            if brace == "{":
+                if pending_key is not None:
+                    stack.append(pending_key)
+                    pending_key = None
+                continue
+            if brace == "}":
+                pending_key = None
+                if stack:
+                    stack.pop()
+                continue
+            if quoted is None:
+                continue
+
+            if pending_key is None:
+                pending_key = quoted
+                continue
+
+            key = pending_key
+            value = quoted
+            pending_key = None
+
+            appid = _current_appid()
+            if appid is None:
+                continue
+            if key.lower() != "playtime":
+                continue
+            try:
+                minutes = int(value)
+            except (TypeError, ValueError):
+                continue
+            if minutes < 0:
+                continue
+            previous = playtimes.get(appid)
+            if previous is None or minutes > previous:
+                playtimes[appid] = minutes
+
+        return playtimes
+
+    def _steam_playtime_minutes(self) -> dict[str, int]:
+        if self._playtime_cache is not None:
+            return self._playtime_cache
+
+        playtime_by_appid: dict[str, int] = {}
+        userdata_dir = self.source.locations.data.root / "userdata"
+        for config_path in userdata_dir.glob("*/config/localconfig.vdf"):
+            if not config_path.is_file():
+                continue
+            try:
+                contents = config_path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            local_map = self._parse_localconfig_playtimes(contents)
+            for appid, minutes in local_map.items():
+                previous = playtime_by_appid.get(appid)
+                if previous is None or minutes > previous:
+                    playtime_by_appid[appid] = minutes
+
+        self._playtime_cache = playtime_by_appid
+        return playtime_by_appid
+
     def get_manifest_dirs(self) -> Iterable[Path]:
         """Get dirs that contain Steam app manifests"""
         libraryfolders_path = self.source.locations.data["libraryfolders.vdf"]
@@ -62,6 +140,7 @@ class SteamSourceIterable(SourceIterable):
         """Generator method producing games"""
         appid_cache = set()
         manifests = self.get_manifests()
+        playtime_by_appid = self._steam_playtime_minutes()
 
         for manifest in manifests:
             # Get metadata from manifest
@@ -102,6 +181,8 @@ class SteamSourceIterable(SourceIterable):
                 / "library_600x900.jpg"
             )
             additional_data = {"local_image_path": image_path, "steam_appid": appid}
+            if (playtime := playtime_by_appid.get(appid)) is not None:
+                additional_data["playtime_minutes"] = playtime
 
             yield (game, additional_data)
 

@@ -1,22 +1,31 @@
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
+from html import escape
 import json
 import os
 import subprocess
 import sys
+import tempfile
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSettings, QSize, QThread, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSettings, QSize, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
     QColor,
     QFont,
+    QFontMetrics,
     QIcon,
+    QImage,
+    QImageReader,
     QKeySequence,
+    QMovie,
+    QPalette,
     QPainter,
     QPainterPath,
     QPen,
@@ -25,6 +34,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -49,6 +59,7 @@ from PySide6.QtWidgets import (
     QStyle,
     QStyleOptionViewItem,
     QToolButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -65,14 +76,32 @@ ROLE_TITLE = Qt.ItemDataRole.UserRole + 3
 ROLE_COVER_PIXMAP = Qt.ItemDataRole.UserRole + 4
 ROLE_SIDEBAR_COUNT = Qt.ItemDataRole.UserRole + 5
 ROLE_SIDEBAR_HEADING = Qt.ItemDataRole.UserRole + 6
+ROLE_PLAYTIME = Qt.ItemDataRole.UserRole + 7
 
 COVER_SIZE = QSize(200, 300)
+CATEGORY_FILTER_PREFIX = "category:"
 
 
 def _fmt_timestamp(timestamp: int) -> str:
     if not timestamp:
         return "-"
     return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
+
+
+def _fmt_playtime_minutes(minutes: int | None) -> str:
+    if minutes is None or minutes <= 0:
+        return ""
+    days, rem_minutes = divmod(int(minutes), 60 * 24)
+    hours, rem_minutes = divmod(rem_minutes, 60)
+    if days:
+        if hours:
+            return f"Played: {days}d {hours}h"
+        return f"Played: {days}d"
+    if hours:
+        if rem_minutes:
+            return f"Played: {hours}h {rem_minutes}m"
+        return f"Played: {hours}h"
+    return f"Played: {rem_minutes}m"
 
 
 def _normalize_name(name: str) -> str:
@@ -82,7 +111,39 @@ def _normalize_name(name: str) -> str:
     return normalized
 
 
+def _clean_category_name(value: str) -> str:
+    return " ".join(value.split()).strip()
+
+
+def _category_filter_key(category_name: str) -> str:
+    return f"{CATEGORY_FILTER_PREFIX}{category_name.casefold()}"
+
+
+def _category_from_filter_key(filter_key: str) -> str | None:
+    if not filter_key.startswith(CATEGORY_FILTER_PREFIX):
+        return None
+    name = filter_key[len(CATEGORY_FILTER_PREFIX) :]
+    return name or None
+
+
 def _source_icon(source: str) -> QIcon:
+    if source.startswith(CATEGORY_FILTER_PREFIX):
+        icon = QIcon.fromTheme("tag-symbolic")
+        if not icon.isNull():
+            return icon
+
+    custom_icon_name = {
+        "steam": "steam_logo.png",
+        "lutris": "lutris.svg",
+        "heroic": "heroic.webp",
+    }.get(source)
+    if custom_icon_name:
+        candidate = Path(__file__).resolve().parents[2] / custom_icon_name
+        if candidate.is_file():
+            custom_icon = QIcon(str(candidate))
+            if not custom_icon.isNull():
+                return custom_icon
+
     icon_name = {
         "all": "view-grid-symbolic",
         "imported": "list-add-symbolic",
@@ -102,6 +163,19 @@ def _source_icon(source: str) -> QIcon:
     return icon
 
 
+def _app_icon() -> QIcon:
+    icon = QIcon.fromTheme(shared.APP_ID)
+    if not icon.isNull():
+        return icon
+    icon = QIcon.fromTheme("org.kde.Klay")
+    if not icon.isNull():
+        return icon
+    candidate = Path(__file__).resolve().parents[2] / "Klay.png"
+    if candidate.is_file():
+        return QIcon(str(candidate))
+    return QIcon.fromTheme("applications-games")
+
+
 def _fit_cover(pixmap: QPixmap, target_size: QSize) -> QPixmap:
     scaled = pixmap.scaled(
         target_size,
@@ -113,19 +187,95 @@ def _fit_cover(pixmap: QPixmap, target_size: QSize) -> QPixmap:
     return scaled.copy(x, y, target_size.width(), target_size.height())
 
 
+def _link_html(url: str, *, color: str = "#8fd2ff") -> str:
+    safe = escape(url.strip(), quote=True)
+    if not safe:
+        return ""
+    return (
+        f'<a href="{safe}" '
+        f'style="color: {color}; text-decoration: underline; font-weight: 500;">'
+        f"{safe}</a>"
+    )
+
+
 class GameCardDelegate(QStyledItemDelegate):
+    OUTER_MARGIN = 6
+    INNER_BORDER = 1
+    TEXT_PAD_H = 11
+    TEXT_PAD_V = 8
+    BASE_CARD_WIDTH = 216
+    BASE_COVER_HEIGHT = 300
+    MIN_CARD_HEIGHT = 368
+    MIN_COVER_HEIGHT = 140
+    MIN_TITLE_PANEL_HEIGHT = 56
+
     def __init__(self, window: "KlayMainWindow", parent: QWidget) -> None:
         super().__init__(parent)
         self.window = window
 
-    def sizeHint(self, _option: QStyleOptionViewItem, _index) -> QSize:
-        return QSize(216, 368)
+    @staticmethod
+    def _meta_font(base_font: QFont) -> QFont:
+        meta_font = QFont(base_font)
+        point_size = meta_font.pointSizeF()
+        if point_size > 0:
+            meta_font.setPointSizeF(max(8.0, point_size - 0.8))
+        return meta_font
+
+    def _title_panel_height(
+        self,
+        option: QStyleOptionViewItem,
+        index,
+        *,
+        text_width: int,
+    ) -> tuple[int, int]:
+        title = str(index.data(ROLE_TITLE) or "")
+        playtime = str(index.data(ROLE_PLAYTIME) or "").strip()
+        metrics = option.fontMetrics
+        title_bounds = metrics.boundingRect(
+            QRect(0, 0, max(1, text_width), 10_000),
+            Qt.TextFlag.TextWordWrap,
+            title,
+        )
+        title_height = max(metrics.lineSpacing(), title_bounds.height())
+
+        meta_height = 0
+        if playtime:
+            meta_height = QFontMetrics(self._meta_font(option.font)).height()
+
+        gap = max(4, metrics.lineSpacing() // 5) if meta_height else 0
+        panel_height = max(
+            self.MIN_TITLE_PANEL_HEIGHT,
+            self.TEXT_PAD_V * 2 + title_height + gap + meta_height,
+        )
+        return panel_height, meta_height
+
+    def sizeHint(self, option: QStyleOptionViewItem, index) -> QSize:
+        inner_width = (
+            self.BASE_CARD_WIDTH - self.OUTER_MARGIN * 2 - self.INNER_BORDER * 2
+        )
+        text_width = inner_width - self.TEXT_PAD_H * 2
+        title_panel_height, _meta_height = self._title_panel_height(
+            option, index, text_width=text_width
+        )
+        card_height = max(
+            self.MIN_CARD_HEIGHT,
+            self.BASE_COVER_HEIGHT
+            + title_panel_height
+            + self.OUTER_MARGIN * 2
+            + self.INNER_BORDER * 2,
+        )
+        return QSize(self.BASE_CARD_WIDTH, card_height)
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index) -> None:
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
-        rect = option.rect.adjusted(6, 6, -6, -6)
+        rect = option.rect.adjusted(
+            self.OUTER_MARGIN,
+            self.OUTER_MARGIN,
+            -self.OUTER_MARGIN,
+            -self.OUTER_MARGIN,
+        )
         hovered = self.window.hovered_card_row == index.row()
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
 
@@ -133,11 +283,13 @@ class GameCardDelegate(QStyledItemDelegate):
         title_background = QColor("#ffffff")
         border = QColor("#d8d8df")
         title_color = QColor("#2e2e34")
+        meta_color = QColor("#565663")
         if option.palette.window().color().lightness() < 128:
             background = QColor("#2f2f35")
             title_background = QColor("#34343b")
             border = QColor("#4b4b56")
             title_color = QColor("#f3f3f6")
+            meta_color = QColor("#c4c4ce")
 
         if hovered:
             border = option.palette.highlight().color()
@@ -153,12 +305,32 @@ class GameCardDelegate(QStyledItemDelegate):
         painter.setBrush(background)
         painter.drawRoundedRect(rect, 10, 10)
 
-        cover_rect = QRect(rect.left() + 1, rect.top() + 1, rect.width() - 2, 300)
+        inner_rect = rect.adjusted(
+            self.INNER_BORDER,
+            self.INNER_BORDER,
+            -self.INNER_BORDER,
+            -self.INNER_BORDER,
+        )
+        text_width = max(1, inner_rect.width() - self.TEXT_PAD_H * 2)
+        title_panel_height, _meta_height = self._title_panel_height(
+            option, index, text_width=text_width
+        )
+        max_title_panel_height = max(
+            self.MIN_TITLE_PANEL_HEIGHT, inner_rect.height() - self.MIN_COVER_HEIGHT
+        )
+        title_panel_height = min(title_panel_height, max_title_panel_height)
+        cover_height = max(self.MIN_COVER_HEIGHT, inner_rect.height() - title_panel_height)
+        cover_rect = QRect(
+            inner_rect.left(),
+            inner_rect.top(),
+            inner_rect.width(),
+            cover_height,
+        )
         title_rect = QRect(
-            rect.left() + 1,
-            cover_rect.bottom() + 1,
-            rect.width() - 2,
-            rect.height() - cover_rect.height() - 2,
+            inner_rect.left(),
+            inner_rect.top() + cover_height,
+            inner_rect.width(),
+            inner_rect.height() - cover_height,
         )
 
         clip_path = QPainterPath()
@@ -168,19 +340,64 @@ class GameCardDelegate(QStyledItemDelegate):
         cover = index.data(ROLE_COVER_PIXMAP)
         if isinstance(cover, QPixmap):
             painter.drawPixmap(cover_rect, cover)
-        painter.setClipping(False)
 
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(title_background)
         painter.drawRect(title_rect)
-
-        text_rect = title_rect.adjusted(11, 8, -11, -8)
-        painter.setPen(title_color)
-        painter.drawText(
-            text_rect,
-            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft | Qt.TextFlag.TextWordWrap,
-            str(index.data(ROLE_TITLE) or ""),
+        painter.setPen(QPen(border, 1))
+        painter.drawLine(
+            title_rect.left(),
+            title_rect.top(),
+            title_rect.right(),
+            title_rect.top(),
         )
+        painter.setClipping(False)
+
+        text_rect = title_rect.adjusted(
+            self.TEXT_PAD_H,
+            self.TEXT_PAD_V,
+            -self.TEXT_PAD_H,
+            -self.TEXT_PAD_V,
+        )
+        title_text = str(index.data(ROLE_TITLE) or "")
+        playtime_text = str(index.data(ROLE_PLAYTIME) or "")
+        if playtime_text:
+            meta_font = self._meta_font(option.font)
+            meta_metrics = QFontMetrics(meta_font)
+            gap = max(4, option.fontMetrics.lineSpacing() // 5)
+            title_text_rect = QRect(
+                text_rect.left(),
+                text_rect.top(),
+                text_rect.width(),
+                max(0, text_rect.height() - meta_metrics.height() - gap),
+            )
+            painter.setPen(title_color)
+            painter.drawText(
+                title_text_rect,
+                Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft | Qt.TextFlag.TextWordWrap,
+                title_text,
+            )
+            painter.setFont(meta_font)
+            painter.setPen(meta_color)
+            playtime_rect = QRect(
+                text_rect.left(),
+                text_rect.bottom() - meta_metrics.height() + 1,
+                text_rect.width(),
+                meta_metrics.height(),
+            )
+            painter.drawText(
+                playtime_rect,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                playtime_text,
+            )
+            painter.setFont(option.font)
+        else:
+            painter.setPen(title_color)
+            painter.drawText(
+                text_rect,
+                Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft | Qt.TextFlag.TextWordWrap,
+                title_text,
+            )
         painter.restore()
 
 
@@ -263,6 +480,8 @@ class ImportSession:
 
 
 class WorkerProgressDialog(QDialog):
+    cancel_requested = Signal()
+
     def __init__(self, *, title: str, message: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
@@ -295,6 +514,10 @@ class WorkerProgressDialog(QDialog):
         self.details_view.setReadOnly(True)
         self.details_view.setMaximumBlockCount(300)
         layout.addWidget(self.details_view, 1)
+
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.cancel_requested.emit)
+        layout.addWidget(self.cancel_button, alignment=Qt.AlignmentFlag.AlignRight)
 
     def set_summary_message(self, text: str) -> None:
         self.message_label.setText(text)
@@ -374,16 +597,35 @@ class ImportWorkerThread(QThread):
         self,
         data_dir_name: str,
         mode: str = "import",
+        fast_mode: bool = False,
+        startup_auto: bool = False,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self.data_dir_name = data_dir_name
         self.mode = mode
+        self.fast_mode = fast_mode
+        self.startup_auto = startup_auto
+        self._cancel_requested = False
+        self._process: subprocess.Popen[str] | None = None
+
+    def stop(self) -> None:
+        self._cancel_requested = True
+        process = self._process
+        if process is None or process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=1.5)
+        except subprocess.TimeoutExpired:
+            process.kill()
 
     def run(self) -> None:  # type: ignore[override]
         env = os.environ.copy()
         env["KLAY_DATA_DIR_NAME"] = self.data_dir_name
         env["KLAY_IMPORT_MODE"] = self.mode
+        env["KLAY_IMPORT_FAST"] = "1" if self.fast_mode else "0"
+        env["KLAY_IMPORT_STARTUP_AUTO"] = "1" if self.startup_auto else "0"
 
         python_path_entries = [entry for entry in sys.path if entry]
         if existing := env.get("PYTHONPATH"):
@@ -402,6 +644,7 @@ class ImportWorkerThread(QThread):
         except OSError as error:
             self.failed.emit(str(error))
             return
+        self._process = process
 
         payload: dict[str, Any] = {}
         output_lines: list[str] = []
@@ -427,6 +670,11 @@ class ImportWorkerThread(QThread):
             payload = parsed
 
         process.wait()
+        self._process = None
+
+        if self._cancel_requested:
+            self.completed.emit({"canceled": True})
+            return
 
         if not payload:
             for candidate in reversed(output_lines):
@@ -462,6 +710,8 @@ class KlayMainWindow(QMainWindow):
         self.settings = QSettings("KDE", "Klay")
         self.runtime_settings = SettingsBackend(self.library.data_dir_name)
         self.initial_search = initial_search
+        app = QApplication.instance()
+        self._default_palette = QPalette(app.palette()) if app is not None else QPalette()
 
         self.games: list[GameEntry] = []
         self.filtered: list[GameEntry] = []
@@ -469,17 +719,26 @@ class KlayMainWindow(QMainWindow):
         self.sort_mode = "last_played"
         self.show_hidden = False
         self.cover_cache: dict[str, QPixmap] = {}
+        self.cover_movies: dict[str, QMovie] = {}
+        self.cover_search_cache: dict[
+            tuple[str, str, str, bool, str],
+            tuple[float, list[dict[str, Any]]],
+        ] = {}
         self.undo_stack: list[UndoEntry] = []
         self.hovered_card_row = -1
         self.active_game_id: str | None = None
         self.active_details_cover: QPixmap | None = None
+        self.details_cover_movie: QMovie | None = None
         self.import_thread: ImportWorkerThread | None = None
         self.import_progress_dialog: WorkerProgressDialog | None = None
         self.last_import_session: ImportSession | None = None
+        self._close_after_import_cancel = False
 
         self.setWindowTitle("Klay")
+        self.setWindowIcon(_app_icon())
         self.resize(1170, 795)
 
+        self._apply_color_mode()
         self._build_ui()
         self._build_actions()
         self._load_state()
@@ -509,7 +768,7 @@ class KlayMainWindow(QMainWindow):
 
         sidebar_header = QHBoxLayout()
         app_icon = QLabel()
-        app_icon.setPixmap(QIcon.fromTheme("applications-games").pixmap(QSize(16, 16)))
+        app_icon.setPixmap(_app_icon().pixmap(QSize(16, 16)))
         sidebar_header.addWidget(app_icon)
         app_name = QLabel("Klay")
         app_name.setObjectName("SidebarTitle")
@@ -608,6 +867,7 @@ class KlayMainWindow(QMainWindow):
         self.games_list.setMouseTracking(True)
         self.games_list.setItemDelegate(GameCardDelegate(self, self.games_list))
         self.games_list.viewport().installEventFilter(self)
+        self.games_list.itemClicked.connect(lambda _item: self.open_selected_details())
         self.games_list.itemActivated.connect(self.activate_selected_game)
         self.games_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.games_list.customContextMenuRequested.connect(self.show_context_menu)
@@ -647,17 +907,21 @@ class KlayMainWindow(QMainWindow):
         self.details_backdrop = QLabel()
         self.details_backdrop.setObjectName("DetailsBackdrop")
         self.details_backdrop.setScaledContents(True)
+        self.details_backdrop.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         blur_effect = QGraphicsBlurEffect(self.details_backdrop)
         blur_effect.setBlurRadius(40)
         self.details_backdrop.setGraphicsEffect(blur_effect)
         stack_layout.addWidget(self.details_backdrop)
 
         foreground = QWidget()
+        self.details_foreground = foreground
+        foreground.installEventFilter(self)
         stack_layout.addWidget(foreground)
+        stack_layout.setCurrentWidget(foreground)
 
         details_layout = QVBoxLayout(foreground)
-        details_layout.setContentsMargins(12, 8, 12, 12)
-        details_layout.setSpacing(10)
+        details_layout.setContentsMargins(18, 14, 18, 18)
+        details_layout.setSpacing(12)
 
         header = QHBoxLayout()
         self.details_back_btn = QToolButton()
@@ -674,15 +938,28 @@ class KlayMainWindow(QMainWindow):
         header.addStretch(1)
         details_layout.addLayout(header)
 
+        details_layout.addStretch(1)
+
+        body_row = QHBoxLayout()
+        body_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        body_row.addStretch(1)
         body_frame = QFrame()
+        self.details_body_frame = body_frame
         body_frame.setObjectName("DetailsBody")
+        body_frame.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        body_frame.setMaximumWidth(980)
         body_layout = QHBoxLayout(body_frame)
-        body_layout.setContentsMargins(24, 24, 24, 24)
-        body_layout.setSpacing(40)
+        body_layout.setContentsMargins(26, 24, 26, 24)
+        body_layout.setSpacing(28)
+        body_row.addWidget(body_frame, 0, Qt.AlignmentFlag.AlignCenter)
+        body_row.addStretch(1)
+        details_layout.addLayout(body_row, 0)
+        details_layout.addStretch(1)
 
         self.details_cover = QLabel()
         self.details_cover.setObjectName("DetailsCover")
-        self.details_cover.setFixedSize(200, 300)
+        self.details_cover.setMinimumSize(180, 270)
+        self.details_cover.setMaximumSize(220, 330)
         self.details_cover.setAlignment(Qt.AlignmentFlag.AlignCenter)
         body_layout.addWidget(self.details_cover, alignment=Qt.AlignmentFlag.AlignTop)
 
@@ -696,6 +973,7 @@ class KlayMainWindow(QMainWindow):
         title_font.setBold(True)
         self.details_title.setFont(title_font)
         self.details_title.setWordWrap(True)
+        self.details_title.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         right.addWidget(self.details_title)
 
         self.details_developer = QLabel("")
@@ -704,6 +982,49 @@ class KlayMainWindow(QMainWindow):
         self.details_developer.setFont(dev_font)
         self.details_developer.setWordWrap(True)
         right.addWidget(self.details_developer)
+
+        self.details_publisher = QLabel("")
+        self.details_publisher.setWordWrap(True)
+        right.addWidget(self.details_publisher)
+
+        self.details_genres = QLabel("")
+        self.details_genres.setWordWrap(True)
+        right.addWidget(self.details_genres)
+
+        self.details_categories = QLabel("")
+        self.details_categories.setWordWrap(True)
+        right.addWidget(self.details_categories)
+
+        self.details_platforms = QLabel("")
+        self.details_platforms.setWordWrap(True)
+        right.addWidget(self.details_platforms)
+
+        self.details_release_date = QLabel("")
+        self.details_release_date.setWordWrap(True)
+        right.addWidget(self.details_release_date)
+
+        self.details_summary = QLabel("")
+        self.details_summary.setWordWrap(True)
+        self.details_summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        right.addWidget(self.details_summary)
+
+        self.details_metacritic = QLabel("")
+        self.details_metacritic.setWordWrap(True)
+        right.addWidget(self.details_metacritic)
+
+        self.details_igdb_rating = QLabel("")
+        self.details_igdb_rating.setWordWrap(True)
+        right.addWidget(self.details_igdb_rating)
+
+        self.details_igdb_url = QLabel("")
+        self.details_igdb_url.setOpenExternalLinks(True)
+        self.details_igdb_url.setWordWrap(True)
+        right.addWidget(self.details_igdb_url)
+
+        self.details_website = QLabel("")
+        self.details_website.setOpenExternalLinks(True)
+        self.details_website.setWordWrap(True)
+        right.addWidget(self.details_website)
 
         dates_row = QHBoxLayout()
         self.details_added = QLabel("Added: -")
@@ -725,7 +1046,6 @@ class KlayMainWindow(QMainWindow):
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
         right.addWidget(self.details_executable)
-        right.addStretch(1)
 
         button_row = QHBoxLayout()
         self.details_play_btn = QPushButton("Play")
@@ -736,6 +1056,11 @@ class KlayMainWindow(QMainWindow):
         self.details_edit_btn.setText("Edit")
         self.details_edit_btn.clicked.connect(self.edit_active_game)
         button_row.addWidget(self.details_edit_btn)
+
+        self.details_categories_btn = QToolButton()
+        self.details_categories_btn.setText("Categories")
+        self.details_categories_btn.clicked.connect(self.edit_active_game_categories)
+        button_row.addWidget(self.details_categories_btn)
 
         self.details_hide_btn = QToolButton()
         self.details_hide_btn.clicked.connect(self.toggle_hide_active_game)
@@ -764,11 +1089,78 @@ class KlayMainWindow(QMainWindow):
             )
         self.details_search_btn.setMenu(search_menu)
         button_row.addWidget(self.details_search_btn)
+
+        self.details_refresh_metadata_btn = QToolButton()
+        self.details_refresh_metadata_btn.setText("Refresh Metadata")
+        self.details_refresh_metadata_btn.clicked.connect(
+            self.refresh_active_game_metadata_from_igdb
+        )
+        button_row.addWidget(self.details_refresh_metadata_btn)
+
+        self.details_cover_picker_btn = QToolButton()
+        self.details_cover_picker_btn.setText("Change Cover")
+        self.details_cover_picker_btn.clicked.connect(self.choose_cover_for_active_game)
+        button_row.addWidget(self.details_cover_picker_btn)
+
         button_row.addStretch(1)
         right.addLayout(button_row)
-
-        details_layout.addWidget(body_frame, 1)
         return page
+
+    def _build_dark_palette(self) -> QPalette:
+        palette = QPalette()
+        palette.setColor(QPalette.ColorRole.Window, QColor(33, 35, 41))
+        palette.setColor(QPalette.ColorRole.WindowText, QColor(239, 240, 241))
+        palette.setColor(QPalette.ColorRole.Base, QColor(24, 26, 31))
+        palette.setColor(QPalette.ColorRole.AlternateBase, QColor(40, 43, 51))
+        palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(30, 32, 36))
+        palette.setColor(QPalette.ColorRole.ToolTipText, QColor(239, 240, 241))
+        palette.setColor(QPalette.ColorRole.Text, QColor(239, 240, 241))
+        palette.setColor(QPalette.ColorRole.Button, QColor(49, 54, 62))
+        palette.setColor(QPalette.ColorRole.ButtonText, QColor(239, 240, 241))
+        palette.setColor(QPalette.ColorRole.BrightText, QColor(255, 90, 90))
+        palette.setColor(QPalette.ColorRole.Highlight, QColor(61, 174, 233))
+        palette.setColor(QPalette.ColorRole.HighlightedText, QColor(20, 20, 20))
+        palette.setColor(QPalette.ColorRole.Mid, QColor(77, 82, 92))
+        palette.setColor(QPalette.ColorRole.Midlight, QColor(97, 103, 116))
+        palette.setColor(QPalette.ColorRole.Shadow, QColor(8, 8, 9))
+        palette.setColor(QPalette.ColorRole.Link, QColor(116, 183, 255))
+        palette.setColor(QPalette.ColorRole.LinkVisited, QColor(177, 142, 255))
+
+        disabled_text = QColor(144, 148, 156)
+        palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, disabled_text)
+        palette.setColor(
+            QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText, disabled_text
+        )
+        palette.setColor(
+            QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, disabled_text
+        )
+        palette.setColor(
+            QPalette.ColorGroup.Disabled,
+            QPalette.ColorRole.HighlightedText,
+            QColor(80, 84, 92),
+        )
+        return palette
+
+    def _apply_color_mode(self) -> None:
+        app = QApplication.instance()
+        if app is None:
+            return
+        dark_mode = self.runtime_settings.get_bool(
+            "dark-mode", GENERAL_BOOL_KEYS["dark-mode"]
+        )
+        if dark_mode:
+            app.setPalette(self._build_dark_palette())
+        else:
+            app.setPalette(QPalette(self._default_palette))
+        app.setStyleSheet("")
+
+        if hasattr(self, "sidebar_frame"):
+            self._apply_styles()
+            if hasattr(self, "games_list"):
+                self.games_list.viewport().update()
+            if hasattr(self, "sidebar_list"):
+                self.sidebar_list.viewport().update()
+            self.update()
 
     def _apply_styles(self) -> None:
         self.setStyleSheet(
@@ -799,14 +1191,17 @@ class KlayMainWindow(QMainWindow):
                 background: palette(base);
             }
             QFrame#DetailsBody {
-                border-radius: 10px;
-                border: 1px solid palette(midlight);
-                background: palette(base);
+                border-radius: 14px;
+                border: 1px solid rgba(255, 255, 255, 28);
+                background: rgba(124, 123, 117, 214);
             }
             QLabel#DetailsCover {
                 border-radius: 8px;
-                border: 1px solid palette(midlight);
-                background: palette(base);
+                border: 1px solid rgba(255, 255, 255, 32);
+                background: rgba(14, 15, 18, 220);
+            }
+            QFrame#DetailsBody QLabel {
+                color: #f2f3f5;
             }
             """
         )
@@ -946,11 +1341,15 @@ class KlayMainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         if self.import_thread is not None and self.import_thread.isRunning():
-            QMessageBox.information(
+            answer = QMessageBox.question(
                 self,
                 "Import In Progress",
-                "Wait for the current import to finish before closing Klay.",
+                "An import is still running. Cancel it and close Klay?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
             )
+            if answer == QMessageBox.StandardButton.Yes:
+                self._cancel_import(close_after=True)
             event.ignore()
             return
 
@@ -960,6 +1359,7 @@ class KlayMainWindow(QMainWindow):
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self._refresh_details_backdrop()
+        self._update_details_card_size()
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # type: ignore[override]
         if watched is self.games_list.viewport():
@@ -979,6 +1379,23 @@ class KlayMainWindow(QMainWindow):
                 if self.hovered_card_row != -1:
                     self.hovered_card_row = -1
                     self.games_list.viewport().update()
+        elif watched is self.details_foreground:
+            if (
+                event.type() == QEvent.Type.MouseButtonPress
+                and self.navigation_stack.currentWidget() == self.details_page
+            ):
+                if hasattr(event, "position"):
+                    point = event.position().toPoint()  # type: ignore[attr-defined]
+                elif hasattr(event, "pos"):
+                    point = event.pos()  # type: ignore[attr-defined]
+                else:
+                    point = QPoint(-1, -1)
+
+                if self.details_body_frame.geometry().contains(point):
+                    return super().eventFilter(watched, event)
+
+                self.show_library_page()
+                return True
         return super().eventFilter(watched, event)
 
     def _add_sidebar_item(
@@ -1022,11 +1439,15 @@ class KlayMainWindow(QMainWindow):
             self.page_title.setText("All Games")
         elif self.current_filter == "imported":
             self.page_title.setText("Added")
+        elif (category_key := _category_from_filter_key(self.current_filter)) is not None:
+            category_name = self._category_labels_by_key().get(category_key, category_key)
+            self.page_title.setText(f"Category: {category_name}")
         else:
             self.page_title.setText(self.library.source_label(self.current_filter))
 
     def reload_games(self) -> None:
         selected_game_id = self.selected_game_id()
+        self._stop_cover_movies()
         self.games = self.library.load_games(
             include_removed=False,
             include_blacklisted=False,
@@ -1054,6 +1475,14 @@ class KlayMainWindow(QMainWindow):
             if game.base_source == "imported":
                 continue
             source_counts[game.base_source] = source_counts.get(game.base_source, 0) + 1
+        category_labels = self._category_labels_by_key(visible_games)
+        category_counts: dict[str, int] = {}
+        for game in visible_games:
+            for category in game.categories:
+                key = _clean_category_name(category).casefold()
+                if not key:
+                    continue
+                category_counts[key] = category_counts.get(key, 0) + 1
 
         self._add_sidebar_item(label="All Games", count=len(visible_games), key="all")
         if added_games:
@@ -1068,6 +1497,16 @@ class KlayMainWindow(QMainWindow):
                     label=self.library.source_label(source),
                     count=count,
                     key=source,
+                )
+        if category_counts:
+            self._add_sidebar_item(label="Categories", heading=True)
+            for category_key in sorted(
+                category_counts, key=lambda key: category_labels.get(key, key).casefold()
+            ):
+                self._add_sidebar_item(
+                    label=category_labels.get(category_key, category_key),
+                    count=category_counts[category_key],
+                    key=_category_filter_key(category_key),
                 )
 
         row_to_select = -1
@@ -1109,6 +1548,37 @@ class KlayMainWindow(QMainWindow):
         if not self.active_game_id:
             return None
         return self.game_by_id(self.active_game_id)
+
+    def _category_labels_by_key(self, games: list[GameEntry] | None = None) -> dict[str, str]:
+        by_key: dict[str, str] = {}
+        for game in games or self.games:
+            for category in game.categories:
+                cleaned = _clean_category_name(category)
+                if not cleaned:
+                    continue
+                key = cleaned.casefold()
+                if key not in by_key:
+                    by_key[key] = cleaned
+        return by_key
+
+    def _normalize_categories(self, categories: list[str]) -> list[str]:
+        by_key: dict[str, str] = {}
+        for category in categories:
+            cleaned = _clean_category_name(category)
+            if not cleaned:
+                continue
+            key = cleaned.casefold()
+            if key not in by_key:
+                by_key[key] = cleaned
+        return [by_key[key] for key in sorted(by_key.keys())]
+
+    def _set_game_categories(self, game: GameEntry, categories: list[str]) -> bool:
+        normalized = self._normalize_categories(categories)
+        if normalized == self._normalize_categories(game.categories):
+            return False
+        game.set_value("categories", normalized)
+        self.library.save_game(game)
+        return True
 
     def set_sort_mode(self, mode: str) -> None:
         if mode not in self.sort_actions:
@@ -1158,6 +1628,9 @@ class KlayMainWindow(QMainWindow):
         self.navigation_stack.setCurrentWidget(self.library_page)
         self.details_backdrop.clear()
         self.active_details_cover = None
+        if self.details_cover_movie is not None:
+            self.details_cover_movie.stop()
+            self.details_cover_movie = None
         if self.search_toggle.isChecked():
             self.search_row.setVisible(True)
 
@@ -1218,6 +1691,42 @@ class KlayMainWindow(QMainWindow):
         self.cover_cache[game.game_id] = pixmap
         return pixmap
 
+    def _stop_cover_movies(self) -> None:
+        for movie in self.cover_movies.values():
+            try:
+                movie.stop()
+            except RuntimeError:
+                pass
+        self.cover_movies.clear()
+
+    def _attach_cover_animation(self, game: GameEntry, item: QListWidgetItem) -> None:
+        cover_path = self.library.cover_path(game)
+        if cover_path is None or cover_path.suffix.lower() not in {".gif", ".webp"}:
+            return
+
+        movie = QMovie(str(cover_path))
+        if not movie.isValid():
+            return
+
+        movie.setCacheMode(QMovie.CacheMode.CacheAll)
+        self.cover_movies[game.game_id] = movie
+
+        def _on_frame_changed(_frame: int, game_id: str = game.game_id, list_item: QListWidgetItem = item, m: QMovie = movie) -> None:
+            frame = m.currentPixmap()
+            if frame.isNull():
+                return
+            try:
+                list_item.setData(ROLE_COVER_PIXMAP, _fit_cover(frame, COVER_SIZE))
+            except RuntimeError:
+                # Item no longer exists (list refreshed).
+                m.stop()
+                self.cover_movies.pop(game_id, None)
+                return
+            self.games_list.viewport().update()
+
+        movie.frameChanged.connect(_on_frame_changed)
+        movie.start()
+
     def _set_empty_state(self) -> None:
         term = self.search_entry.text().strip()
         if term:
@@ -1237,6 +1746,7 @@ class KlayMainWindow(QMainWindow):
         self.statusBar().showMessage("0 game(s)")
 
     def apply_filters(self, *, select_game_id: str | None = None) -> None:
+        self._stop_cover_movies()
         term = self.search_entry.text().strip().lower()
 
         if self.show_hidden:
@@ -1245,6 +1755,12 @@ class KlayMainWindow(QMainWindow):
             games = [game for game in self.games if not game.hidden]
             if self.current_filter == "imported":
                 games = [game for game in games if game.base_source == "imported"]
+            elif (category_key := _category_from_filter_key(self.current_filter)) is not None:
+                games = [
+                    game
+                    for game in games
+                    if any(category.casefold() == category_key for category in game.categories)
+                ]
             elif self.current_filter != "all":
                 games = [game for game in games if game.base_source == self.current_filter]
 
@@ -1254,7 +1770,12 @@ class KlayMainWindow(QMainWindow):
                 for game in games
                 if term in game.name.lower()
                 or term in game.developer.lower()
+                or term in game.publisher.lower()
                 or term in game.source.lower()
+                or any(term in category.lower() for category in game.categories)
+                or any(term in genre.lower() for genre in game.genres)
+                or any(term in platform.lower() for platform in game.platforms)
+                or term in game.release_date.lower()
             ]
 
         self.filtered = self._sorted_games(games)
@@ -1265,8 +1786,10 @@ class KlayMainWindow(QMainWindow):
             item.setData(ROLE_GAME_ID, game.game_id)
             item.setData(ROLE_TITLE, game.name)
             item.setData(ROLE_COVER_PIXMAP, self._game_cover(game))
+            item.setData(ROLE_PLAYTIME, _fmt_playtime_minutes(game.playtime_minutes))
             item.setToolTip(game.name)
             self.games_list.addItem(item)
+            self._attach_cover_animation(game, item)
 
         if not self.filtered:
             self._set_empty_state()
@@ -1286,6 +1809,503 @@ class KlayMainWindow(QMainWindow):
 
     def _show_error(self, title: str, text: str) -> None:
         QMessageBox.critical(self, title, text)
+
+    def choose_cover_for_active_game(self) -> None:
+        game = self.active_game()
+        if game is None:
+            return
+        api_key = self.runtime_settings.get_string("sgdb-key", "").strip()
+        igdb_client_id = self.runtime_settings.get_string("igdb-client-id", "").strip()
+        igdb_token = self.runtime_settings.get_string("igdb-key", "").strip()
+        igdb_secret = self.runtime_settings.get_string("igdb-client-secret", "").strip()
+        sgdb_sig = api_key[:10] if api_key else ""
+        igdb_sig = (
+            f"{igdb_client_id[:10]}:{(igdb_token or igdb_secret)[:10]}"
+            if igdb_client_id and (igdb_token or igdb_secret)
+            else ""
+        )
+        cache_key = (game.name.strip().lower(), sgdb_sig, igdb_sig, True, "v2")
+        cache_ttl_s = 300.0
+        picker_button = self.details_cover_picker_btn
+        picker_button_original_text = picker_button.text()
+        picker_button.setEnabled(False)
+        picker_button.setText("Loading...")
+        self.statusBar().showMessage(f"Searching covers for {game.name}...")
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Choose Cover: {game.name}")
+        dialog.resize(1120, 760)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        hint_label = QLabel(
+            "Click a cover card to apply it. Animated options are marked and shown first."
+        )
+        hint_label.setWordWrap(True)
+        layout.addWidget(hint_label)
+
+        loading_row = QWidget()
+        loading_layout = QHBoxLayout(loading_row)
+        loading_layout.setContentsMargins(0, 0, 0, 0)
+        loading_layout.setSpacing(8)
+        loading_label = QLabel("Searching cover providers...")
+        loading_bar = QProgressBar()
+        loading_bar.setRange(0, 0)
+        loading_bar.setTextVisible(False)
+        loading_layout.addWidget(loading_label, 1)
+        loading_layout.addWidget(loading_bar)
+        layout.addWidget(loading_row)
+
+        list_widget = QListWidget()
+        list_widget.setViewMode(QListWidget.ViewMode.IconMode)
+        list_widget.setFlow(QListWidget.Flow.LeftToRight)
+        list_widget.setResizeMode(QListWidget.ResizeMode.Adjust)
+        list_widget.setMovement(QListWidget.Movement.Static)
+        list_widget.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        list_widget.setUniformItemSizes(True)
+        list_widget.setWrapping(True)
+        list_widget.setWordWrap(True)
+        list_widget.setSpacing(14)
+        thumb_size = QSize(170, 255)
+        list_widget.setIconSize(thumb_size)
+        list_widget.setGridSize(QSize(220, 332))
+        list_widget.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        list_widget.setEnabled(False)
+        layout.addWidget(list_widget, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        role_url = Qt.ItemDataRole.UserRole
+        role_animated = Qt.ItemDataRole.UserRole + 1
+        role_mime = Qt.ItemDataRole.UserRole + 2
+        role_local_path = Qt.ItemDataRole.UserRole + 3
+
+        placeholder = _fit_cover(self._placeholder_cover(), thumb_size)
+        selected: dict[str, Any] = {}
+
+        def _path_animated(path: Path) -> bool:
+            suffix = path.suffix.lower()
+            if suffix == ".gif":
+                return True
+            if suffix not in {".webp", ".apng"}:
+                return False
+            reader = QImageReader(str(path))
+            frame_count = reader.imageCount()
+            if frame_count > 1:
+                return True
+            if frame_count == 1:
+                return False
+            return bool(reader.supportsAnimation())
+
+        def _choose_item(item: QListWidgetItem | None) -> None:
+            if item is None:
+                return
+            selected["url"] = str(item.data(role_url) or "").strip()
+            selected["local_path"] = str(item.data(role_local_path) or "").strip()
+            selected["mime"] = str(item.data(role_mime) or "").strip().lower()
+            selected["animated"] = bool(item.data(role_animated))
+            if selected["url"] or selected["local_path"]:
+                dialog.accept()
+
+        loader = ThreadPoolExecutor(max_workers=4)
+        search_loader = ThreadPoolExecutor(max_workers=1)
+        thumb_jobs: dict[Future[Path | None], QListWidgetItem] = {}
+        movie_jobs: dict[Future[Path | None], tuple[QListWidgetItem, str, str]] = {}
+        active_movies: dict[str, QMovie] = {}
+        icon_cache: dict[str, QIcon] = {}
+        job_timer = QTimer(dialog)
+        job_timer.setInterval(14)
+        search_timer = QTimer(dialog)
+        search_timer.setInterval(24)
+        search_future: Future[list[dict[str, Any]]] | None = None
+
+        def _make_thumb(url: str, mime: str, animated: bool) -> Path | None:
+            return self.library.cached_remote_thumbnail_path(
+                url=url,
+                mime=mime,
+                animated=animated,
+                width=thumb_size.width(),
+                height=thumb_size.height(),
+                timeout=8,
+            )
+
+        def _make_movie_source(url: str, mime: str) -> Path | None:
+            return self.library.cached_remote_cover_path(
+                url=url,
+                mime=mime,
+                animated=True,
+                timeout=8,
+            )
+
+        def _set_item_icon(item: QListWidgetItem, pixmap: QPixmap, *, cache_key: str = "") -> None:
+            if pixmap.isNull():
+                return
+            if pixmap.size() != thumb_size:
+                pixmap = _fit_cover(pixmap, thumb_size)
+            icon = QIcon(pixmap)
+            if cache_key:
+                icon_cache[cache_key] = icon
+            item.setIcon(icon)
+
+        def _start_item_movie(item: QListWidgetItem, source: Path, *, movie_key: str) -> bool:
+            existing = active_movies.pop(movie_key, None)
+            if existing is not None:
+                existing.stop()
+                existing.deleteLater()
+            movie = QMovie(str(source))
+            if not movie.isValid():
+                movie.deleteLater()
+                return False
+            movie.setCacheMode(QMovie.CacheMode.CacheNone)
+
+            def _on_frame_changed(
+                _frame: int,
+                *,
+                list_item: QListWidgetItem = item,
+                current_movie: QMovie = movie,
+                key: str = movie_key,
+            ) -> None:
+                frame = current_movie.currentPixmap()
+                if frame.isNull():
+                    return
+                _set_item_icon(list_item, frame, cache_key=key)
+
+            movie.frameChanged.connect(_on_frame_changed)
+            _on_frame_changed(0)
+            movie.start()
+            active_movies[movie_key] = movie
+            return True
+
+        def _poll_thumb_jobs() -> None:
+            done = [future for future in list(thumb_jobs) if future.done()]
+            for future in done[:24]:
+                item = thumb_jobs.pop(future, None)
+                if item is None:
+                    continue
+                try:
+                    thumb_path = future.result()
+                except Exception:
+                    thumb_path = None
+                if thumb_path is None:
+                    continue
+                url = str(item.data(role_url) or "").strip()
+                if url in icon_cache:
+                    item.setIcon(icon_cache[url])
+                    continue
+                pixmap = QPixmap(str(thumb_path))
+                _set_item_icon(item, pixmap, cache_key=url)
+
+            movie_done = [future for future in list(movie_jobs) if future.done()]
+            for future in movie_done[:12]:
+                entry = movie_jobs.pop(future, None)
+                if entry is None:
+                    continue
+                item, url, mime = entry
+                try:
+                    movie_source = future.result()
+                except Exception:
+                    movie_source = None
+                if movie_source is not None and _start_item_movie(item, movie_source, movie_key=url):
+                    continue
+                thumb_jobs[loader.submit(_make_thumb, url, mime, True)] = item
+
+            if not thumb_jobs and not movie_jobs:
+                job_timer.stop()
+
+        def _search_options() -> list[dict[str, Any]]:
+            now = time.monotonic()
+            cached = self.cover_search_cache.get(cache_key)
+            if cached is not None and (now - cached[0]) <= cache_ttl_s:
+                return [dict(entry) for entry in cached[1]]
+
+            options: list[dict[str, Any]] = []
+            if api_key:
+                options.extend(
+                    self.library.search_sgdb_cover_options(
+                        game_name=game.name,
+                        api_key=api_key,
+                        animated=True,
+                        limit=60,
+                    )
+                )
+            if igdb_client_id and (igdb_token or igdb_secret):
+                options.extend(
+                    self.library.search_igdb_cover_options(
+                        game_name=game.name,
+                        client_id=igdb_client_id,
+                        access_token=igdb_token,
+                        client_secret=igdb_secret,
+                        limit=24,
+                    )
+                )
+
+            deduped_options: list[dict[str, Any]] = []
+            seen_urls: set[str] = set()
+            for option in options:
+                url = str(option.get("url") or "").strip()
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                deduped_options.append(option)
+            ordered = sorted(
+                deduped_options,
+                key=lambda option: not bool(option.get("animated", False)),
+            )
+            self.cover_search_cache[cache_key] = (now, [dict(entry) for entry in ordered])
+            if len(self.cover_search_cache) > 64:
+                oldest_key = min(
+                    self.cover_search_cache.items(),
+                    key=lambda pair: pair[1][0],
+                )[0]
+                self.cover_search_cache.pop(oldest_key, None)
+            return ordered
+
+        def _append_option_item(option: dict[str, Any], index: int) -> None:
+            url = str(option.get("url") or "").strip()
+            if not url:
+                return
+            mime = str(option.get("mime") or "").strip().lower()
+            animated = bool(option.get("animated"))
+            provider = str(option.get("provider") or "").strip().upper()
+            detail = str(option.get("label") or f"Option {index}").strip()
+            state_text = "ANIMATED" if animated else "STATIC"
+            label_parts = [part for part in (provider, state_text, detail) if part]
+            label = "\n".join([label_parts[0], " | ".join(label_parts[1:])]) if label_parts else f"Option {index}"
+            item = QListWidgetItem(QIcon(placeholder), label)
+            item.setData(role_url, url)
+            item.setData(role_animated, animated)
+            item.setData(role_mime, mime)
+            item.setData(role_local_path, "")
+            item.setToolTip(label.replace("\n", " | "))
+            list_widget.addItem(item)
+            if animated:
+                movie_jobs[loader.submit(_make_movie_source, url, mime)] = (item, url, mime)
+            else:
+                thumb_jobs[loader.submit(_make_thumb, url, mime, False)] = item
+
+        def _append_current_cover_item() -> int:
+            cover_path = self.library.cover_path(game)
+            if cover_path is None or not cover_path.is_file():
+                return 0
+            animated = _path_animated(cover_path)
+            suffix = cover_path.suffix.lower().lstrip(".")
+            mime = {
+                "gif": "image/gif",
+                "png": "image/png",
+                "jpg": "image/jpeg",
+                "jpeg": "image/jpeg",
+                "webp": "image/webp",
+                "tiff": "image/tiff",
+            }.get(suffix, "")
+            state_text = "ANIMATED" if animated else "STATIC"
+            detail = f"{state_text} | Local cover | {mime or suffix or 'image'}"
+            label = f"CURRENT\n{detail}"
+            pixmap = QPixmap(str(cover_path))
+            icon = QIcon(placeholder)
+            if not pixmap.isNull():
+                if pixmap.size() != thumb_size:
+                    pixmap = _fit_cover(pixmap, thumb_size)
+                icon = QIcon(pixmap)
+            item = QListWidgetItem(icon, label)
+            item.setData(role_url, "")
+            item.setData(role_animated, animated)
+            item.setData(role_mime, mime)
+            item.setData(role_local_path, str(cover_path))
+            item.setToolTip(f"{label.replace(chr(10), ' | ')} | {cover_path.name}")
+            list_widget.addItem(item)
+            if animated:
+                _start_item_movie(item, cover_path, movie_key=f"local:{cover_path}")
+            return 1
+
+        def _apply_options(options: list[dict[str, Any]]) -> None:
+            if not options:
+                loading_label.setText(
+                    "No online cover options found. Check SteamGridDB/IGDB credentials in Preferences."
+                )
+                loading_bar.hide()
+                return
+            animated_count = sum(1 for option in options if bool(option.get("animated")))
+            loading_label.setText(
+                f"Found {len(options)} covers ({animated_count} animated). Click one to apply."
+            )
+            loading_bar.hide()
+            list_widget.setEnabled(True)
+            for index, option in enumerate(options, start=1):
+                _append_option_item(option, index)
+            if (thumb_jobs or movie_jobs) and not job_timer.isActive():
+                job_timer.start()
+
+        def _poll_search() -> None:
+            if search_future is None or not search_future.done():
+                return
+            search_timer.stop()
+            try:
+                options = search_future.result()
+            except Exception:
+                options = []
+            _apply_options(options)
+
+        def _shutdown_loader() -> None:
+            if job_timer.isActive():
+                job_timer.stop()
+            if search_timer.isActive():
+                search_timer.stop()
+            if search_future is not None:
+                search_future.cancel()
+            for future in list(thumb_jobs):
+                future.cancel()
+            for future in list(movie_jobs):
+                future.cancel()
+            for movie in list(active_movies.values()):
+                movie.stop()
+                movie.deleteLater()
+            active_movies.clear()
+            loader.shutdown(wait=False, cancel_futures=True)
+            search_loader.shutdown(wait=False, cancel_futures=True)
+
+        def _start_search() -> None:
+            nonlocal search_future
+            if search_future is not None:
+                return
+            search_future = search_loader.submit(_search_options)
+            if not search_timer.isActive():
+                search_timer.start()
+
+        def _restore_picker_button() -> None:
+            picker_button.setEnabled(True)
+            picker_button.setText(picker_button_original_text)
+
+        def _on_dialog_finished(_result: int) -> None:
+            _shutdown_loader()
+            _restore_picker_button()
+
+        current_item_count = _append_current_cover_item()
+        if current_item_count > 0:
+            list_widget.setEnabled(True)
+            loading_label.setText("Current cover shown. Searching cover providers...")
+
+        list_widget.itemClicked.connect(_choose_item)
+        list_widget.itemActivated.connect(_choose_item)
+        dialog.finished.connect(_on_dialog_finished)
+        job_timer.timeout.connect(_poll_thumb_jobs)
+        search_timer.timeout.connect(_poll_search)
+        QTimer.singleShot(0, _start_search)
+
+        result = dialog.exec()
+        if result != QDialog.DialogCode.Accepted:
+            return
+
+        selected_url = str(selected.get("url") or "").strip()
+        selected_local_path = str(selected.get("local_path") or "").strip()
+        selected_mime = str(selected.get("mime") or "").strip().lower()
+        selected_animated = bool(selected.get("animated"))
+        if not selected_url and not selected_local_path:
+            current = list_widget.currentItem()
+            if current is not None:
+                selected_url = str(current.data(role_url) or "").strip()
+                selected_local_path = str(current.data(role_local_path) or "").strip()
+                selected_mime = str(current.data(role_mime) or "").strip().lower()
+                selected_animated = bool(current.data(role_animated))
+        if not selected_url and not selected_local_path:
+            return
+
+        if selected_local_path:
+            selected_path = Path(selected_local_path)
+            current_path = self.library.cover_path(game)
+            try:
+                same_cover = (
+                    current_path is not None
+                    and current_path.is_file()
+                    and selected_path.is_file()
+                    and selected_path.resolve() == current_path.resolve()
+                )
+            except OSError:
+                same_cover = False
+            if same_cover:
+                self.statusBar().showMessage("Cover unchanged")
+                return
+            try:
+                self.library.set_cover(game, selected_path)
+            except OSError:
+                self._show_error("Cover Selection", "Failed to apply selected cover.")
+                return
+        elif not self.library.set_cover_from_url(
+            game,
+            selected_url,
+            mime=selected_mime,
+            animated=selected_animated,
+        ):
+            self._show_error("Cover Selection", "Failed to download selected cover.")
+            return
+
+        self.cover_cache.pop(game.game_id, None)
+        self.reload_games()
+        refreshed = self.game_by_id(game.game_id)
+        if refreshed is not None:
+            self.open_game_details(refreshed)
+        self.statusBar().showMessage("Cover updated")
+
+    def refresh_active_game_metadata_from_igdb(self) -> None:
+        game = self.active_game()
+        if game is None:
+            return
+
+        client_id = self.runtime_settings.get_string("igdb-client-id", "").strip()
+        token = self.runtime_settings.get_string("igdb-key", "").strip()
+        client_secret = self.runtime_settings.get_string("igdb-client-secret", "").strip()
+        if not client_id or (not token and not client_secret):
+            QMessageBox.warning(
+                self,
+                "IGDB Metadata",
+                "Set IGDB Client ID and Client Secret (or Access Token) in Preferences.",
+            )
+            return
+
+        button = self.details_refresh_metadata_btn
+        original_text = button.text()
+        button.setEnabled(False)
+        button.setText("Refreshing...")
+        self.statusBar().showMessage(f"Refreshing metadata for {game.name}...")
+        try:
+            metadata = self.library.search_igdb_metadata(
+                game_name=game.name,
+                client_id=client_id,
+                access_token=token,
+                client_secret=client_secret,
+            )
+        except Exception as error:
+            button.setEnabled(True)
+            button.setText(original_text)
+            self._show_error("IGDB Metadata", f"Refresh failed: {error}")
+            return
+
+        button.setEnabled(True)
+        button.setText(original_text)
+        if not metadata:
+            self.statusBar().showMessage("No IGDB metadata found")
+            return
+
+        changed = False
+        for key, value in metadata.items():
+            if value in (None, "", []):
+                continue
+            if game.data.get(key) != value:
+                game.set_value(key, value)
+                changed = True
+
+        if not changed:
+            self.statusBar().showMessage("Metadata already up to date")
+            return
+
+        self.library.save_game(game)
+        self.reload_games()
+        refreshed = self.game_by_id(game.game_id)
+        if refreshed is not None:
+            self.open_game_details(refreshed)
+        self.statusBar().showMessage("Metadata refreshed from IGDB")
 
     def launch_game(self, game: GameEntry) -> None:
         try:
@@ -1495,6 +2515,102 @@ class KlayMainWindow(QMainWindow):
             return
         self.edit_game(game)
 
+    def edit_game_categories(self, game: GameEntry) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Categories: {game.name}")
+        dialog.setMinimumWidth(420)
+        dialog.setMinimumHeight(360)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        hint = QLabel("Create categories and check the ones to assign to this game.")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        add_row = QHBoxLayout()
+        category_input = QLineEdit()
+        category_input.setPlaceholderText("New category")
+        add_row.addWidget(category_input, 1)
+        add_button = QPushButton("Add")
+        add_row.addWidget(add_button)
+        layout.addLayout(add_row)
+
+        category_list = QListWidget()
+        layout.addWidget(category_list, 1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        layout.addWidget(buttons)
+
+        assigned_keys = {category.casefold() for category in game.categories}
+        categories_by_key = self._category_labels_by_key()
+
+        def _refresh_list() -> None:
+            category_list.clear()
+            for key in sorted(categories_by_key, key=lambda item: categories_by_key[item].casefold()):
+                item = QListWidgetItem(categories_by_key[key])
+                item.setData(Qt.ItemDataRole.UserRole, key)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(
+                    Qt.CheckState.Checked if key in assigned_keys else Qt.CheckState.Unchecked
+                )
+                category_list.addItem(item)
+
+        def _add_category() -> None:
+            assigned_keys.clear()
+            for row in range(category_list.count()):
+                item = category_list.item(row)
+                key = str(item.data(Qt.ItemDataRole.UserRole) or "").strip()
+                if key and item.checkState() == Qt.CheckState.Checked:
+                    assigned_keys.add(key)
+            name = _clean_category_name(category_input.text())
+            if not name:
+                return
+            key = name.casefold()
+            if key not in categories_by_key:
+                categories_by_key[key] = name
+            assigned_keys.add(key)
+            category_input.clear()
+            _refresh_list()
+
+        _refresh_list()
+        add_button.clicked.connect(_add_category)
+        category_input.returnPressed.connect(_add_category)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        selected_categories: list[str] = []
+        for row in range(category_list.count()):
+            item = category_list.item(row)
+            key = str(item.data(Qt.ItemDataRole.UserRole) or "").strip()
+            if not key or item.checkState() != Qt.CheckState.Checked:
+                continue
+            selected_categories.append(categories_by_key.get(key, item.text()))
+
+        if not self._set_game_categories(game, selected_categories):
+            return
+
+        self.statusBar().showMessage(f"Updated categories for {game.name}")
+        selected_game_id = game.game_id
+        self.reload_games()
+        self.apply_filters(select_game_id=selected_game_id)
+        if self.navigation_stack.currentWidget() == self.details_page:
+            refreshed = self.game_by_id(selected_game_id)
+            if refreshed is not None:
+                self.open_game_details(refreshed)
+
+    def edit_active_game_categories(self) -> None:
+        game = self.active_game()
+        if game is None:
+            return
+        self.edit_game_categories(game)
+
     def launch_active_game(self) -> None:
         game = self.active_game()
         if game is None:
@@ -1516,15 +2632,31 @@ class KlayMainWindow(QMainWindow):
     def _set_import_in_progress(self, importing: bool) -> None:
         self.import_action.setEnabled(not importing)
         self.add_game_action.setEnabled(not importing)
-        self.preferences_action.setEnabled(not importing)
         self.empty_import_button.setEnabled(not importing)
 
     def _close_import_progress(self) -> None:
         if self.import_progress_dialog is None:
             return
+        try:
+            self.import_progress_dialog.cancel_requested.disconnect()
+        except (TypeError, RuntimeError):
+            pass
         self.import_progress_dialog.close()
         self.import_progress_dialog.deleteLater()
         self.import_progress_dialog = None
+
+    def _cancel_import(self, *, close_after: bool = False) -> None:
+        if self.import_thread is None or not self.import_thread.isRunning():
+            if close_after:
+                self.close()
+            return
+
+        self._close_after_import_cancel = self._close_after_import_cancel or close_after
+        if self.import_progress_dialog is not None:
+            self.import_progress_dialog.set_summary_message("Canceling import...")
+            self.import_progress_dialog.cancel_button.setEnabled(False)
+        self.statusBar().showMessage("Canceling background task...")
+        self.import_thread.stop()
 
     def _on_import_thread_progress(self, payload: dict[str, Any], mode: str) -> None:
         if self.import_progress_dialog is not None:
@@ -1566,7 +2698,7 @@ class KlayMainWindow(QMainWindow):
         if self.active_game_id == game_id and self.navigation_stack.currentWidget() == self.details_page:
             self.details_cover.setPixmap(
                 new_cover.scaled(
-                    self.details_cover.size(),
+                    self._details_cover_target_size(),
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )
@@ -1582,6 +2714,11 @@ class KlayMainWindow(QMainWindow):
     ) -> None:
         self._set_import_in_progress(False)
         self._close_import_progress()
+
+        if payload.get("canceled"):
+            self.last_import_session = None
+            self.statusBar().showMessage("Import canceled")
+            return
 
         imported = int(payload.get("imported", 0) or 0)
         removed = int(payload.get("removed", 0) or 0)
@@ -1624,15 +2761,22 @@ class KlayMainWindow(QMainWindow):
             return
 
         if mode == "refresh_metadata":
+            include_cover_refresh = self.runtime_settings.get_bool(
+                "refresh-covers-on-metadata", False
+            )
             if metadata_updates == 0 and cover_updates == 0:
-                summary = "No metadata or cover changes"
+                summary = (
+                    "No metadata or cover changes"
+                    if include_cover_refresh
+                    else "No metadata changes"
+                )
             else:
                 parts: list[str] = []
                 if metadata_updates:
                     parts.append(f"{metadata_updates} metadata updates")
-                if cover_updates:
+                if include_cover_refresh and cover_updates:
                     parts.append(f"{cover_updates} cover updates")
-                if new_cover_updates:
+                if include_cover_refresh and new_cover_updates:
                     parts.append(f"{new_cover_updates} new covers")
                 summary = ", ".join(parts)
         elif imported == 0 and removed == 0:
@@ -1675,6 +2819,9 @@ class KlayMainWindow(QMainWindow):
     def _on_import_thread_failed(self, message: str, auto: bool, mode: str) -> None:
         self._set_import_in_progress(False)
         self._close_import_progress()
+        if message == "Import canceled":
+            self.statusBar().showMessage("Import canceled")
+            return
         self.statusBar().showMessage("Refresh failed" if mode == "refresh_metadata" else "Import failed")
         title = "Refresh Failed" if mode == "refresh_metadata" else "Import Failed"
         if auto:
@@ -1688,6 +2835,9 @@ class KlayMainWindow(QMainWindow):
         if self.import_thread is not None:
             self.import_thread.deleteLater()
         self.import_thread = None
+        if self._close_after_import_cancel:
+            self._close_after_import_cancel = False
+            self.close()
 
     def _run_worker(self, *, mode: str, auto: bool) -> None:
         if self.import_thread is not None and self.import_thread.isRunning():
@@ -1695,21 +2845,40 @@ class KlayMainWindow(QMainWindow):
             return
 
         self._set_import_in_progress(True)
+        include_cover_refresh = self.runtime_settings.get_bool(
+            "refresh-covers-on-metadata", False
+        )
         progress_text = (
-            "Refreshing metadata and covers…"
+            (
+                "Refreshing metadata and covers…"
+                if include_cover_refresh
+                else "Refreshing metadata…"
+            )
             if mode == "refresh_metadata"
             else "Importing games…"
         )
         progress_title = "Refresh Metadata" if mode == "refresh_metadata" else "Import"
-        self.import_progress_dialog = WorkerProgressDialog(
-            title=progress_title,
-            message=progress_text,
+        if auto:
+            self.import_progress_dialog = None
+            self.statusBar().showMessage(progress_text)
+        else:
+            self.import_progress_dialog = WorkerProgressDialog(
+                title=progress_title,
+                message=progress_text,
+                parent=self,
+            )
+            self.import_progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+            self.import_progress_dialog.cancel_requested.connect(self._cancel_import)
+            self.import_progress_dialog.show()
+
+        fast_mode = bool(auto and mode == "import")
+        self.import_thread = ImportWorkerThread(
+            self.library.data_dir_name,
+            mode=mode,
+            fast_mode=fast_mode,
+            startup_auto=bool(auto and mode == "import"),
             parent=self,
         )
-        self.import_progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
-        self.import_progress_dialog.show()
-
-        self.import_thread = ImportWorkerThread(self.library.data_dir_name, mode=mode, parent=self)
         self.import_thread.progress.connect(
             lambda payload, worker_mode=mode: self._on_import_thread_progress(
                 payload, worker_mode
@@ -1740,6 +2909,7 @@ class KlayMainWindow(QMainWindow):
             return
 
         dialog.apply()
+        self._apply_color_mode()
         self.apply_filters(select_game_id=self.selected_game_id())
         if dialog.refresh_requested:
             self.refresh_metadata_from_sgdb()
@@ -1799,10 +2969,55 @@ class KlayMainWindow(QMainWindow):
         overlay.fill(Qt.GlobalColor.transparent)
         painter = QPainter(overlay)
         painter.drawPixmap(0, 0, pixmap)
-        painter.fillRect(overlay.rect(), QColor(14, 14, 18, 148))
+        accent = self._cover_accent_color(self.active_details_cover)
+        painter.fillRect(overlay.rect(), QColor(accent.red(), accent.green(), accent.blue(), 120))
+        painter.fillRect(overlay.rect(), QColor(10, 10, 14, 84))
         painter.end()
 
         self.details_backdrop.setPixmap(overlay)
+        self._apply_details_accent(accent)
+
+    def _details_cover_target_size(self) -> QSize:
+        width = max(180, min(220, self.details_cover.width() or 200))
+        height = int(width * 1.5)
+        return QSize(width, height)
+
+    def _update_details_card_size(self) -> None:
+        if not hasattr(self, "details_body_frame"):
+            return
+        available = max(340, self.details_page.width() - 96)
+        self.details_body_frame.setMaximumWidth(min(980, available))
+
+    def _cover_accent_color(self, pixmap: QPixmap) -> QColor:
+        image = pixmap.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+        step_x = max(1, image.width() // 18)
+        step_y = max(1, image.height() // 18)
+        red = green = blue = samples = 0
+        for y in range(0, image.height(), step_y):
+            for x in range(0, image.width(), step_x):
+                color = image.pixelColor(x, y)
+                red += color.red()
+                green += color.green()
+                blue += color.blue()
+                samples += 1
+        if samples == 0:
+            return QColor(52, 72, 96)
+        return QColor(red // samples, green // samples, blue // samples)
+
+    def _apply_details_accent(self, accent: QColor) -> None:
+        # Keep card tone consistent for readability across all covers.
+        _unused = accent
+        light_border = QColor(210, 210, 205, 88)
+        background = QColor(124, 123, 117, 214)
+        self.details_body_frame.setStyleSheet(
+            (
+                "QFrame#DetailsBody {"
+                f"border-radius: 14px; border: 1px solid rgba({light_border.red()}, {light_border.green()}, {light_border.blue()}, {light_border.alpha()}); "
+                f"background: rgba({background.red()}, {background.green()}, {background.blue()}, {background.alpha()});"
+                "}"
+                "QFrame#DetailsBody QLabel { color: #f2f3f5; }"
+            )
+        )
 
     def open_game_details(self, game: GameEntry) -> None:
         self.active_game_id = game.game_id
@@ -1811,24 +3026,74 @@ class KlayMainWindow(QMainWindow):
         self.details_title.setText(game.name)
         self.details_developer.setText(game.developer or "")
         self.details_developer.setVisible(bool(game.developer))
+        self.details_publisher.setText(
+            f"Publisher: {game.publisher}" if game.publisher else ""
+        )
+        self.details_publisher.setVisible(bool(game.publisher))
+        self.details_genres.setText(
+            f"Genres: {', '.join(game.genres)}" if game.genres else ""
+        )
+        self.details_genres.setVisible(bool(game.genres))
+        self.details_categories.setText(
+            f"Categories: {', '.join(game.categories)}" if game.categories else ""
+        )
+        self.details_categories.setVisible(bool(game.categories))
+        self.details_platforms.setText(
+            f"Platforms: {', '.join(game.platforms)}" if game.platforms else ""
+        )
+        self.details_platforms.setVisible(bool(game.platforms))
+        self.details_release_date.setText(
+            f"Release Date: {game.release_date}" if game.release_date else ""
+        )
+        self.details_release_date.setVisible(bool(game.release_date))
+        self.details_summary.setText(game.summary or "")
+        self.details_summary.setVisible(bool(game.summary))
+        self.details_metacritic.setText(
+            f"Metacritic: {game.metacritic_score}" if game.metacritic_score is not None else ""
+        )
+        self.details_metacritic.setVisible(game.metacritic_score is not None)
+        self.details_igdb_rating.setText(
+            f"IGDB Rating: {game.igdb_rating:.1f}" if game.igdb_rating is not None else ""
+        )
+        self.details_igdb_rating.setVisible(game.igdb_rating is not None)
+        self.details_igdb_url.setText(_link_html(game.igdb_url) if game.igdb_url else "")
+        self.details_igdb_url.setVisible(bool(game.igdb_url))
+        self.details_website.setText(_link_html(game.website) if game.website else "")
+        self.details_website.setVisible(bool(game.website))
         self.details_added.setText(f"Added: {_fmt_timestamp(game.added)}")
         self.details_last_played.setText(f"Last played: {_fmt_timestamp(game.last_played)}")
         self.details_executable.setText(game.executable_text() or "-")
         self.details_hide_btn.setText("Unhide" if game.hidden else "Hide")
 
-        cover = self._game_cover(game)
-        self.details_cover.setPixmap(
-            cover.scaled(
-                self.details_cover.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
+        if self.details_cover_movie is not None:
+            self.details_cover_movie.stop()
+            self.details_cover_movie = None
+
+        cover_path = self.library.cover_path(game)
+        if cover_path is not None and cover_path.suffix.lower() in {".gif", ".webp"}:
+            movie = QMovie(str(cover_path))
+            target = self._details_cover_target_size()
+            movie.setScaledSize(target)
+            self.details_cover.setMovie(movie)
+            movie.start()
+            self.details_cover_movie = movie
+            frame = movie.currentPixmap()
+            cover = frame if not frame.isNull() else self._game_cover(game)
+        else:
+            cover = self._game_cover(game)
+            self.details_cover.setPixmap(
+                cover.scaled(
+                    self._details_cover_target_size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
             )
-        )
 
         self.active_details_cover = cover
         self._refresh_details_backdrop()
         self.navigation_stack.setCurrentWidget(self.details_page)
         self.search_row.setVisible(False)
+        self._update_details_card_size()
 
     def show_context_menu(self, position: QPoint) -> None:
         item = self.games_list.itemAt(position)
@@ -1843,6 +3108,7 @@ class KlayMainWindow(QMainWindow):
         menu.addAction("Play", lambda: self.launch_game(game))
         menu.addAction("Details", lambda: self.open_game_details(game))
         menu.addAction("Edit", lambda: self.edit_game(game))
+        menu.addAction("Categories...", lambda: self.edit_game_categories(game))
         menu.addAction("Unhide" if game.hidden else "Hide", lambda: self.toggle_hide_game(game))
         menu.addAction("Remove", lambda: self.remove_game(game))
 
