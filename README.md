@@ -26,18 +26,8 @@ Klay is a standalone Qt/KDE-focused fork of Cartridges: a unified launcher for g
 ## Screenshots
 
 <p align="center">
-  <img src="data/screenshots/1.png" alt="Klay library view" width="32%">
-  <img src="data/screenshots/2.png" alt="Klay details page" width="32%">
-  <img src="data/screenshots/3.png" alt="Klay cover picker" width="32%">
-</p>
-
-<p align="center">
-  <img src="data/screenshots/4.png" alt="Klay preferences and import settings" width="60%">
-</p>
-
-<p align="center">
+  <img src="screenshots/light_theme.png" alt="Klay light mode library view" width="49%">
   <img src="screenshots/dark_theme.png" alt="Klay dark mode" width="49%">
-  <img src="screenshots/light_theme.png" alt="Klay light mode" width="49%">
 </p>
 
 <p align="center">
