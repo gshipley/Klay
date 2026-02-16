@@ -1,7 +1,5 @@
-# Klay
-Klay - Play games on KDE
-
-Klay is a standalone Qt/KDE-focused game launcher that unifies games from multiple sources with rich cover art and metadata.
+# Klay - Play games on KDE
+sKlay is a standalone Qt/KDE-focused game launcher that unifies games from multiple sources with rich cover art and metadata.
 
 **Inspired by and based on the great [Cartridges](https://github.com/kra-mo/cartridges) app for GNOME.**
 
@@ -20,10 +18,9 @@ Klay is a standalone Qt/KDE-focused game launcher that unifies games from multip
   - Desktop Entries
 - Main library cover grid with animated cover support (`.gif`, animated `.webp`)
 - Game details page with backdrop, metadata, and quick actions
-- SteamGridDB + IGDB integration for covers and metadata
+- SteamGridDB + IGDB integration for covers and metadata (Users have to provide their own API keys)
 - Playtime display on game cards when available from importer sources
 - Category management: create categories, assign games, and filter from the left nav
-- Dark mode toggle in Preferences
 - Optional splash screen + startup sound
 
 ## Screenshots
