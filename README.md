@@ -1,8 +1,9 @@
 # Klay
+Klay - Play games on KDE
 
 Klay is a standalone Qt/KDE-focused game launcher that unifies games from multiple sources with rich cover art and metadata.
 
-**Inspired by the great [Cartridges](https://github.com/kra-mo/cartridges) app for GNOME.**
+**Inspired by and based on the great [Cartridges](https://github.com/kra-mo/cartridges) app for GNOME.**
 
 ## Highlights
 
@@ -36,6 +37,30 @@ Klay is a standalone Qt/KDE-focused game launcher that unifies games from multip
   <img src="screenshots/game_detail.png" alt="Klay game details view" width="49%">
   <img src="screenshots/cover_manager.png" alt="Klay cover selection view" width="49%">
 </p>
+
+## Download (Flatpak)
+
+Latest releases:
+
+`https://github.com/gshipley/Klay/releases/latest`
+
+Install from a downloaded release asset:
+
+```bash
+flatpak install --user --reinstall ./com.grantshipley.Klay.Devel.flatpak
+flatpak run com.grantshipley.Klay.Devel
+```
+
+## Publishing A Release
+
+Create and push a version tag:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+GitHub Actions builds the Flatpak and publishes it on the repository Releases page automatically.
 
 ## Build
 
