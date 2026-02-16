@@ -8,7 +8,7 @@ concurrency:
   group: release-${{ github.sha }}
 jobs:
   flatpak:
-    name: Flatpak
+    name: Linux Flatpak
     runs-on: ubuntu-latest
     container:
       image: bilelmoussaoui/flatpak-github-actions:gnome-47
@@ -23,77 +23,8 @@ jobs:
           bundle: com.grantshipley.Klay.Devel.flatpak
           manifest-path: build-aux/flatpak/com.grantshipley.Klay.Devel.json
 
-  windows:
-    name: Windows
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup MSYS2
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: UCRT64
-          update: true
-          install: mingw-w64-ucrt-x86_64-python-gobject mingw-w64-ucrt-x86_64-python-yaml mingw-w64-ucrt-x86_64-python-requests mingw-w64-ucrt-x86_64-python-pillow mingw-w64-ucrt-x86_64-desktop-file-utils mingw-w64-ucrt-x86_64-ca-certificates mingw-w64-ucrt-x86_64-meson git
-
-      - name: Compile
-        shell: msys2 {0}
-        run: |
-          meson setup _build
-          ninja -C _build install
-          pacman --noconfirm -Rs mingw-w64-ucrt-x86_64-desktop-file-utils mingw-w64-ucrt-x86_64-meson git
-
-      - name: Test
-        shell: msys2 {0}
-        run: |
-          set +e
-          timeout 2 klay; [ "$?" -eq "124" ]
-
-      - name: Inno Setup
-        run: iscc ".\_build\build-aux\windows\Klay.iss"
-
-      - name: Upload Artifact
+      - name: Upload Flatpak Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Windows Installer
-          path: _build/build-aux/windows/Output/Klay Windows.exe
-
-  macos:
-    name: macOS
-    runs-on: macos-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Homebrew
-        id: set-up-homebrew
-        uses: Homebrew/actions/setup-homebrew@master
-
-      - name: Install Dependencies
-        run: |
-          brew install meson pygobject3 desktop-file-utils pyinstaller pillow
-          pip3 install --break-system-packages requests PyYAML
-
-      - name: Meson Build
-        run: |
-          meson setup _build -Dtiff_compression=jpeg
-          ninja install -C _build
-
-      - name: PyInstaller
-        env:
-          PYTHONPATH: /opt/homebrew/opt/homebrew/lib/python3.12/site-packages
-        run: |
-          cd build-aux/macos
-          pyinstaller ./klay.spec
-
-      - name: Zip
-        run: |
-          cd build-aux/macos/dist
-          zip -yr Klay\ macOS.zip Klay.app
-
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          path: build-aux/macos/dist/Klay macOS.zip
-          name: macOS Application
+          name: Linux Flatpak
+          path: com.grantshipley.Klay.Devel.flatpak

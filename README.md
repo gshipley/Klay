@@ -1,6 +1,7 @@
 # Klay
 
 Klay is a standalone Qt/KDE-focused game launcher that unifies games from multiple sources with rich cover art and metadata.
+Inspired by the great Cartridges app for GNOME: [Cartridges](https://github.com/kra-mo/cartridges).
 
 ## Highlights
 
