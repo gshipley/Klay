@@ -196,6 +196,10 @@ def main(_version: str, argv: list[str] | None = None) -> int:
         )
         return 1
 
+    os.environ.setdefault("QT_WAYLAND_APP_ID", shared.APP_ID)
+    if hasattr(QApplication, "setDesktopFileName"):
+        QApplication.setDesktopFileName(shared.APP_ID)
+
     app = QApplication(sys.argv[:1])
     app.setApplicationName("Klay")
     app.setOrganizationDomain("grantshipley.com")

@@ -10,4 +10,4 @@ Categories=@APP_CATEGORIES@
 # Translators: Keep app names unchanged.
 Keywords=gaming;games;play;@BINARY_NAME@;launch;launcher;steam;lutris;heroic;epic;bottles;itch;legendary;retroarch;
 StartupNotify=true
-StartupWMClass=Klay
+StartupWMClass=@BINARY_NAME@
