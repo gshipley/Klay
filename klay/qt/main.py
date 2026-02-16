@@ -68,9 +68,19 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _asset_path(*segments: str) -> Path:
+    return _project_root().joinpath("assets", *segments)
+
+
 def _splash_logo_path() -> Path | None:
-    logo = _project_root() / "Klay.png"
-    return logo if logo.is_file() else None
+    candidates = (
+        _asset_path("images", "Klay.png"),
+        _project_root() / "Klay.png",
+    )
+    for logo in candidates:
+        if logo.is_file():
+            return logo
+    return None
 
 
 def _splash_sound_path() -> Path | None:
@@ -81,8 +91,13 @@ def _splash_sound_path() -> Path | None:
         candidate_paths.append(Path(env_value).expanduser())
 
     cwd = Path.cwd()
+    assets_audio_dir = _asset_path("audio")
     candidate_paths.extend(
         [
+            assets_audio_dir / preferred_name,
+            assets_audio_dir / "splash.mp3",
+            assets_audio_dir / "splash.wav",
+            assets_audio_dir / "splash.ogg",
             cwd / preferred_name,
             cwd / "splash.mp3",
             cwd / "splash.wav",
@@ -104,6 +119,10 @@ def _splash_sound_path() -> Path | None:
         if candidate.is_file():
             return candidate
 
+    for pattern in ("*.mp3", "*.wav", "*.ogg"):
+        matches = sorted(assets_audio_dir.glob(pattern))
+        if matches:
+            return matches[0]
     for pattern in ("*.mp3", "*.wav", "*.ogg"):
         matches = sorted(cwd.glob(pattern))
         if matches:

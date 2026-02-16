@@ -126,6 +126,14 @@ def _category_from_filter_key(filter_key: str) -> str | None:
     return name or None
 
 
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _asset_path(*segments: str) -> Path:
+    return _project_root().joinpath("assets", *segments)
+
+
 def _source_icon(source: str) -> QIcon:
     if source.startswith(CATEGORY_FILTER_PREFIX):
         icon = QIcon.fromTheme("tag-symbolic")
@@ -138,11 +146,15 @@ def _source_icon(source: str) -> QIcon:
         "heroic": "heroic.webp",
     }.get(source)
     if custom_icon_name:
-        candidate = Path(__file__).resolve().parents[2] / custom_icon_name
-        if candidate.is_file():
-            custom_icon = QIcon(str(candidate))
-            if not custom_icon.isNull():
-                return custom_icon
+        candidates = (
+            _asset_path("images", custom_icon_name),
+            _project_root() / custom_icon_name,
+        )
+        for candidate in candidates:
+            if candidate.is_file():
+                custom_icon = QIcon(str(candidate))
+                if not custom_icon.isNull():
+                    return custom_icon
 
     icon_name = {
         "all": "view-grid-symbolic",
@@ -170,9 +182,9 @@ def _app_icon() -> QIcon:
     icon = QIcon.fromTheme("com.grantshipley.Klay")
     if not icon.isNull():
         return icon
-    candidate = Path(__file__).resolve().parents[2] / "Klay.png"
-    if candidate.is_file():
-        return QIcon(str(candidate))
+    for candidate in (_asset_path("images", "Klay.png"), _project_root() / "Klay.png"):
+        if candidate.is_file():
+            return QIcon(str(candidate))
     return QIcon.fromTheme("applications-games")
 
 
