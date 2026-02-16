@@ -46,6 +46,7 @@ conf = configuration_data()
 conf.set('PYTHON', py_installation.full_path())
 conf.set('PYTHON_VERSION', py_installation.language_version())
 conf.set('APP_ID', app_id)
+conf.set('ICON_ID', base_app_id)
 conf.set('APP_NAME', app_name)
 conf.set('APP_CATEGORIES', app_categories)
 conf.set('BINARY_NAME', binary_name)
@@ -63,6 +64,9 @@ conf.set('libexecdir', libexecdir)
 
 subdir('data')
 subdir('klay')
+
+# Runtime media/images used by the Qt UI (splash, source icons, etc.).
+install_subdir('assets', install_dir: pkgdatadir)
 
 if host_machine.system() == 'windows'
   subdir('build-aux/windows')

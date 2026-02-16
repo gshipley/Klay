@@ -131,6 +131,11 @@ def _project_root() -> Path:
 
 
 def _asset_path(*segments: str) -> Path:
+    pkgdatadir = getattr(shared, "PKGDATADIR", "")
+    if pkgdatadir:
+        candidate = Path(pkgdatadir).joinpath("assets", *segments)
+        if candidate.exists():
+            return candidate
     return _project_root().joinpath("assets", *segments)
 
 
@@ -747,7 +752,10 @@ class KlayMainWindow(QMainWindow):
         self._close_after_import_cancel = False
 
         self.setWindowTitle("Klay")
-        self.setWindowIcon(_app_icon())
+        icon = _app_icon()
+        if app is not None and app.windowIcon().isNull() and not icon.isNull():
+            app.setWindowIcon(icon)
+        self.setWindowIcon(icon)
         self.resize(1170, 795)
 
         self._apply_color_mode()

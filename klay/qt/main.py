@@ -43,32 +43,16 @@ def _run_launch_mode(library: GameLibrary, game_id: str) -> int:
     return 0
 
 
-def _desktop_file_is_available(app_id: str) -> bool:
-    desktop_name = f"{app_id}.desktop"
-    search_roots: list[Path] = []
-
-    if data_home := os.getenv("XDG_DATA_HOME"):
-        search_roots.append(Path(data_home))
-    else:
-        search_roots.append(Path.home() / ".local/share")
-
-    data_dirs = os.getenv("XDG_DATA_DIRS", "/usr/local/share:/usr/share")
-    for directory in data_dirs.split(":"):
-        if directory:
-            search_roots.append(Path(directory))
-
-    for root in search_roots:
-        if (root / "applications" / desktop_name).is_file():
-            return True
-
-    return False
-
-
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
 def _asset_path(*segments: str) -> Path:
+    pkgdatadir = getattr(shared, "PKGDATADIR", "")
+    if pkgdatadir:
+        candidate = Path(pkgdatadir).joinpath("assets", *segments)
+        if candidate.exists():
+            return candidate
     return _project_root().joinpath("assets", *segments)
 
 
@@ -177,6 +161,19 @@ def _sound_duration_ms(path: Path) -> int:
     return max(0, int(seconds * 1000))
 
 
+def _qt_app_icon(qicon_cls):
+    icon = qicon_cls.fromTheme(shared.APP_ID)
+    if not icon.isNull():
+        return icon
+    icon = qicon_cls.fromTheme("com.grantshipley.Klay")
+    if not icon.isNull():
+        return icon
+    for candidate in (_asset_path("images", "Klay.png"), _project_root() / "Klay.png"):
+        if candidate.is_file():
+            return qicon_cls(str(candidate))
+    return icon
+
+
 def main(_version: str, argv: list[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
     data_dir_name = os.getenv("KLAY_DATA_DIR_NAME", "klay")
@@ -187,7 +184,7 @@ def main(_version: str, argv: list[str] | None = None) -> int:
 
     try:
         from PySide6.QtCore import QUrl, QSize, Qt
-        from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
+        from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
         from PySide6.QtWidgets import QApplication, QMessageBox, QSplashScreen
     except ModuleNotFoundError:
         print(
@@ -203,7 +200,10 @@ def main(_version: str, argv: list[str] | None = None) -> int:
     app.setApplicationName("Klay")
     app.setOrganizationDomain("grantshipley.com")
     app.setOrganizationName("Grant Shipley")
-    if hasattr(app, "setDesktopFileName") and _desktop_file_is_available(shared.APP_ID):
+    app_icon = _qt_app_icon(QIcon)
+    if not app_icon.isNull():
+        app.setWindowIcon(app_icon)
+    if hasattr(app, "setDesktopFileName"):
         app.setDesktopFileName(shared.APP_ID)
 
     settings = SettingsBackend(data_dir_name)

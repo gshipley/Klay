@@ -3,10 +3,11 @@ Name=@APP_NAME@
 GenericName=Game Launcher
 Comment=Launch all your games
 Exec=@BINARY_NAME@
-Icon=@APP_ID@
+Icon=@ICON_ID@
 Terminal=false
 Type=Application
 Categories=@APP_CATEGORIES@
 # Translators: Keep app names unchanged.
 Keywords=gaming;games;play;@BINARY_NAME@;launch;launcher;steam;lutris;heroic;epic;bottles;itch;legendary;retroarch;
 StartupNotify=true
+StartupWMClass=Klay
