@@ -21,6 +21,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Get tag and app version
+        id: version
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          version="${tag#v}"
+          echo "tag_name=${tag}" >> "$GITHUB_OUTPUT"
+          echo "app_version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Sync Meson version with tag
+        run: |
+          version="${{ steps.version.outputs.app_version }}"
+          sed -i -E "s/(version:[[:space:]]*)'[^']+'/\\1'${version}'/" meson.build
+          grep -n "version:" meson.build
+
       - name: Build Flatpak bundle
         uses: flatpak/flatpak-github-actions/flatpak-builder@v6.5
         with:
@@ -42,15 +56,11 @@ jobs:
             echo '```'
           } > release_notes
 
-      - name: Get tag name
-        id: get_tag_name
-        run: echo tag_name=${GITHUB_REF#refs/tags/} >> $GITHUB_OUTPUT
-
       - name: Publish release
         uses: softprops/action-gh-release@v2.2.2
         with:
           files: |
             com.grantshipley.Klay.Devel.flatpak
           fail_on_unmatched_files: true
-          tag_name: ${{ steps.get_tag_name.outputs.tag_name }}
+          tag_name: ${{ steps.version.outputs.tag_name }}
           body_path: release_notes
