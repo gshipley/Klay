@@ -601,9 +601,29 @@ class GameLibrary:
         game.data["last_played"] = int(time())
         self.save_game(game)
 
+    @staticmethod
+    def _is_flatpak_sandbox() -> bool:
+        return bool(os.getenv("FLATPAK_ID"))
+
+    @staticmethod
+    def _list_uses_host_spawn(executable: list[str]) -> bool:
+        if len(executable) < 2:
+            return False
+        command = Path(str(executable[0])).name
+        return command == "flatpak-spawn" and executable[1] == "--host"
+
+    @staticmethod
+    def _string_uses_host_spawn(executable: str) -> bool:
+        command = executable.strip()
+        return command.startswith("flatpak-spawn --host ") or command.startswith(
+            "/usr/bin/flatpak-spawn --host "
+        )
+
     def launch(self, game: GameEntry) -> None:
         executable = game.executable
         if isinstance(executable, list):
+            if self._is_flatpak_sandbox() and not self._list_uses_host_spawn(executable):
+                executable = ["flatpak-spawn", "--host", *executable]
             subprocess.Popen(executable, start_new_session=True)  # noqa: S603
         elif sys.platform.startswith("win"):
             subprocess.Popen(
@@ -612,6 +632,11 @@ class GameLibrary:
                 start_new_session=True,
                 creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
             )  # noqa: S602,S603
+        elif self._is_flatpak_sandbox() and not self._string_uses_host_spawn(executable):
+            subprocess.Popen(  # noqa: S603
+                ["flatpak-spawn", "--host", "/bin/sh", "-lc", executable],
+                start_new_session=True,
+            )
         else:
             subprocess.Popen(executable, shell=True, start_new_session=True)  # noqa: S602,S603
 
