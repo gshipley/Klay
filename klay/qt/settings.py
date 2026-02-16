@@ -7,7 +7,7 @@ from typing import Any
 
 GENERAL_BOOL_KEYS = {
     "dark-mode": False,
-    "show-splash": True,
+    "show-splash": False,
     "auto-import": False,
     "exit-after-launch": False,
     "cover-launches-game": False,

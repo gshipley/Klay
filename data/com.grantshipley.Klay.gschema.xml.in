@@ -3,7 +3,7 @@
 
   <schema id="@APP_ID@" path="@PREFIX@/">
     <key name="show-splash" type="b">
-      <default>true</default>
+      <default>false</default>
     </key>
     <key name="auto-import" type="b">
         <default>false</default>
