@@ -83,7 +83,7 @@ class SteamRateLimiter(RateLimiter):
         """
         Load the pick history from schema.
 
-        Allows remembering API limits through restarts of Cartridges.
+        Allows remembering API limits through restarts of Klay.
         """
         super()._init_pick_history()
         timestamps_str = shared.state_schema.get_string("steam-limiter-tokens-history")

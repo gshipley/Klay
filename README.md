@@ -1,6 +1,6 @@
 # Klay
 
-Klay is a standalone Qt/KDE-focused fork of Cartridges: a unified launcher for games from multiple sources with rich cover art and metadata.
+Klay is a standalone Qt/KDE-focused game launcher that unifies games from multiple sources with rich cover art and metadata.
 
 ## Highlights
 
@@ -52,11 +52,12 @@ meson compile -C _build
 
 - Python 3
 - PySide6 (Qt frontend)
+- PyGObject (`gi`, GLib/Gio bindings used by import backends/settings)
 
 Fedora:
 
 ```bash
-sudo dnf install python3-pyside6
+sudo dnf install python3-pyside6 python3-gobject
 ```
 
 Pip (user install):
@@ -180,8 +181,7 @@ Klay uses its own namespace:
 
 ## Project Notes
 
-- App ID: `org.kde.Klay`
+- App ID: `com.grantshipley.Klay`
 - Binary: `klay`
 - Python namespace: `klay`
 - Extension docs: `docs/klay.md`
-- Qt parity notes: `docs/qt-parity.md`

@@ -5,10 +5,10 @@
   <project_license>GPL-3.0-or-later</project_license>
   <name>@APP_NAME@</name>
   <summary>Launch all your games</summary>
-  <developer id="org.kde">
+  <developer id="com.grantshipley">
     <name>Klay Contributors</name>
   </developer>
-  <url type="homepage">https://github.com/CartridgesApp/Klay</url>
+  <url type="homepage">https://github.com/gshipley/Klay</url>
   <description>
     <p>@APP_NAME@ is a KDE-focused game launcher that brings titles from Steam, Heroic, Lutris,
     Bottles, RetroArch, and more into one fast library so you can browse, search, and start

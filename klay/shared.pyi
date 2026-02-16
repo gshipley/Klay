@@ -18,13 +18,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from gi.repository import Gio
-
-from klay.importer.importer import Importer
-from klay.store.store import Store
-from klay.window import KlayWindow
 
 
 class AppState:
@@ -72,12 +68,8 @@ programfiles32_dir: Path
 
 app_support_dir: Path
 
-
-scale_factor: int
-image_size: int
-
-win: Optional[KlayWindow]
-importer: Optional[Importer]
+win: Optional[Any]
+importer: Optional[Any]
 import_time: Optional[int]
-store = Optional[Store]
+store: Optional[Any]
 log_files: list[Path]

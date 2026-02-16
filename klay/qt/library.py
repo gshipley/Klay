@@ -390,7 +390,7 @@ class GameLibrary:
             response = requests.get(
                 normalized,
                 timeout=timeout,
-                headers={"User-Agent": "Klay/1.0 (+https://github.com/CartridgesApp/Klay)"},
+                headers={"User-Agent": "Klay/1.0 (+https://github.com/gshipley/Klay)"},
             )
             response.raise_for_status()
             payload = response.content

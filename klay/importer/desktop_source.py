@@ -23,7 +23,7 @@ import subprocess
 from pathlib import Path
 from typing import NamedTuple
 
-from gi.repository import GLib, Gtk
+from gi.repository import GLib
 
 from klay import shared
 from klay.game import Game
@@ -36,8 +36,6 @@ class DesktopSourceIterable(SourceIterable):
     def __iter__(self):
         """Generator method producing games"""
 
-        icon_theme = Gtk.IconTheme.new()
-
         search_paths = [
             shared.host_data_dir,
             "/run/host/usr/local/share",
@@ -46,19 +44,29 @@ class DesktopSourceIterable(SourceIterable):
             "/usr/share/pixmaps",
         ] + GLib.get_system_data_dirs()
 
-        for search_path in search_paths:
-            path = Path(search_path)
+        icon_theme = None
+        try:
+            import gi
 
-            if not str(search_path).endswith("/pixmaps"):
-                path = path / "icons"
+            gi.require_version("Gtk", "4.0")
+            from gi.repository import Gtk  # pylint: disable=import-outside-toplevel
 
-            if not path.is_dir():
-                continue
+            icon_theme = Gtk.IconTheme.new()
+            for search_path in search_paths:
+                path = Path(search_path)
 
-            if str(path).startswith("/app/"):
-                continue
+                if not str(search_path).endswith("/pixmaps"):
+                    path = path / "icons"
 
-            icon_theme.add_search_path(str(path))
+                if not path.is_dir():
+                    continue
+
+                if str(path).startswith("/app/"):
+                    continue
+
+                icon_theme.add_search_path(str(path))
+        except Exception:
+            icon_theme = None
 
         launch_command, full_path = self.check_launch_commands()
 
@@ -156,22 +164,24 @@ class DesktopSourceIterable(SourceIterable):
                         yield (game, additional_data)
                         continue
 
-                try:
-                    if (
-                        icon_path := icon_theme.lookup_icon(
+                if icon_theme is not None:
+                    direction = 0
+                    if shared.win is not None and hasattr(shared.win, "get_direction"):
+                        direction = shared.win.get_direction()
+                    try:
+                        icon_info = icon_theme.lookup_icon(
                             icon_str,
                             None,
                             512,
                             1,
-                            shared.win.get_direction(),
+                            direction,
                             0,
                         )
-                        .get_file()
-                        .get_path()
-                    ):
-                        additional_data = {"local_icon_path": Path(icon_path)}
-                except GLib.Error:
-                    pass
+                        icon_file = icon_info.get_file()
+                        if icon_file and (icon_path := icon_file.get_path()):
+                            additional_data = {"local_icon_path": Path(icon_path)}
+                    except Exception:
+                        pass
 
                 yield (game, additional_data)
 

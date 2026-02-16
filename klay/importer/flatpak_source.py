@@ -21,7 +21,7 @@ from itertools import chain
 from pathlib import Path
 from typing import NamedTuple
 
-from gi.repository import GLib, Gtk
+from gi.repository import GLib
 
 from klay import shared
 from klay.game import Game
@@ -35,12 +35,23 @@ class FlatpakSourceIterable(SourceIterable):
     def __iter__(self):
         """Generator method producing games"""
 
-        icon_theme = Gtk.IconTheme.new()
-        if user_data := self.source.locations.user_data["icons"]:
-            icon_theme.add_search_path(str(user_data))
+        user_data = self.source.locations.user_data["icons"]
+        system_data = self.source.locations.system_data["icons"]
+        icon_theme = None
+        try:
+            import gi
 
-        if system_data := self.source.locations.system_data["icons"]:
-            icon_theme.add_search_path(str(system_data))
+            gi.require_version("Gtk", "4.0")
+            from gi.repository import Gtk  # pylint: disable=import-outside-toplevel
+
+            icon_theme = Gtk.IconTheme.new()
+            if user_data:
+                icon_theme.add_search_path(str(user_data))
+
+            if system_data:
+                icon_theme.add_search_path(str(system_data))
+        except Exception:
+            icon_theme = None
 
         if not (system_data or user_data):
             return
@@ -50,8 +61,8 @@ class FlatpakSourceIterable(SourceIterable):
             "hu.kramo.Cartridges.Devel",
             "page.kramo.Cartridges",
             "page.kramo.Cartridges.Devel",
-            "org.kde.Klay",
-            "org.kde.Klay.Devel",
+            "com.grantshipley.Klay",
+            "com.grantshipley.Klay.Devel",
             shared.APP_ID,
         }
         blacklist = (
@@ -110,24 +121,24 @@ class FlatpakSourceIterable(SourceIterable):
 
             additional_data = {}
 
-            try:
-                if (
-                    icon_path := icon_theme.lookup_icon(
+            if icon_theme is not None:
+                direction = 0
+                if shared.win is not None and hasattr(shared.win, "get_direction"):
+                    direction = shared.win.get_direction()
+                try:
+                    icon_info = icon_theme.lookup_icon(
                         keyfile.get_string("Desktop Entry", "Icon"),
                         None,
                         512,
                         1,
-                        shared.win.get_direction(),
+                        direction,
                         0,
                     )
-                    .get_file()
-                    .get_path()
-                ):
-                    additional_data = {"local_icon_path": Path(icon_path)}
-                else:
+                    icon_file = icon_info.get_file()
+                    if icon_file and (icon_path := icon_file.get_path()):
+                        additional_data = {"local_icon_path": Path(icon_path)}
+                except Exception:
                     pass
-            except GLib.Error:
-                pass
 
             yield (game, additional_data)
 

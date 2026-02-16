@@ -6,7 +6,7 @@
   <name>Klay</name>
   <shortdesc xml:lang="en">A KDE-focused game launcher</shortdesc>
   <description xml:lang="en">
-Klay is a standalone KDE-focused fork of Cartridges.
+Klay is a standalone KDE-focused game launcher.
   </description>
   <license rdf:resource="https://spdx.org/licenses/GPL-3.0-or-later.html"/>
   <programming-language>Python</programming-language>

@@ -1,5 +1,5 @@
 {
-  "id": "org.kde.Klay.Devel",
+  "id": "com.grantshipley.Klay.Devel",
   "runtime": "org.gnome.Platform",
   "runtime-version": "49",
   "sdk": "org.gnome.Sdk",

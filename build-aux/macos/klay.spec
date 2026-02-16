@@ -5,13 +5,15 @@ a = Analysis(
     ["../../_build/klay/klay"],
     pathex=[],
     binaries=[],
-    datas=[("../../_build/data/klay.gresource", "Resources")],
+    datas=[],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={
         "gi": {
             "module-versions": {
-                "Gtk": "4.0",
+                "GLib": "2.0",
+                "Gio": "2.0",
+                "GdkPixbuf": "2.0",
             },
         },
     },
@@ -52,7 +54,7 @@ app = BUNDLE(
     coll,
     name="Klay.app",
     icon="./icon.icns",
-    bundle_identifier="org.kde.Klay",
+    bundle_identifier="com.grantshipley.Klay",
     info_plist={
         "LSApplicationCategoryType": "public.app-category.games",
     },

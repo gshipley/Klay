@@ -1,25 +1,8 @@
-data/org.kde.Klay.desktop.in
-data/org.kde.Klay.gschema.xml.in
-data/org.kde.Klay.metainfo.xml.in
+data/com.grantshipley.Klay.desktop.in
+data/com.grantshipley.Klay.gschema.xml.in
+data/com.grantshipley.Klay.metainfo.xml.in
 
-data/gtk/details-dialog.blp
-data/gtk/game.blp
-data/gtk/preferences.blp
-data/gtk/shortcuts-dialog.blp
-data/gtk/window.blp
-
-klay/main.py
-klay/window.py
-klay/details_dialog.py
-klay/game.py
-klay/preferences.py
-
-klay/utils/create_dialog.py
-klay/utils/relative_date.py
-
-klay/importer/importer.py
 klay/importer/source.py
-klay/importer/location.py
 klay/importer/location.py
 klay/importer/bottles_source.py
 klay/importer/desktop_source.py
@@ -30,5 +13,3 @@ klay/importer/legendary_source.py
 klay/importer/lutris_source.py
 klay/importer/retroarch_source.py
 klay/importer/steam_source.py
-
-klay/store/managers/sgdb_manager.py

@@ -182,8 +182,8 @@ def main(_version: str, argv: list[str] | None = None) -> int:
 
     app = QApplication(sys.argv[:1])
     app.setApplicationName("Klay")
-    app.setOrganizationDomain("kde.org")
-    app.setOrganizationName("KDE")
+    app.setOrganizationDomain("grantshipley.com")
+    app.setOrganizationName("Grant Shipley")
     if hasattr(app, "setDesktopFileName") and _desktop_file_is_available(shared.APP_ID):
         app.setDesktopFileName(shared.APP_ID)
 

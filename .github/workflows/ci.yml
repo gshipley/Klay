@@ -20,8 +20,8 @@ jobs:
       - name: Flatpak Builder
         uses: flatpak/flatpak-github-actions/flatpak-builder@v6.5
         with:
-          bundle: org.kde.Klay.Devel.flatpak
-          manifest-path: build-aux/flatpak/org.kde.Klay.Devel.json
+          bundle: com.grantshipley.Klay.Devel.flatpak
+          manifest-path: build-aux/flatpak/com.grantshipley.Klay.Devel.json
 
   windows:
     name: Windows
@@ -35,7 +35,7 @@ jobs:
         with:
           msystem: UCRT64
           update: true
-          install: mingw-w64-ucrt-x86_64-gtk4 mingw-w64-ucrt-x86_64-libadwaita mingw-w64-ucrt-x86_64-python-gobject mingw-w64-ucrt-x86_64-python-yaml mingw-w64-ucrt-x86_64-python-requests mingw-w64-ucrt-x86_64-python-pillow mingw-w64-ucrt-x86_64-desktop-file-utils mingw-w64-ucrt-x86_64-ca-certificates mingw-w64-ucrt-x86_64-meson git
+          install: mingw-w64-ucrt-x86_64-python-gobject mingw-w64-ucrt-x86_64-python-yaml mingw-w64-ucrt-x86_64-python-requests mingw-w64-ucrt-x86_64-python-pillow mingw-w64-ucrt-x86_64-desktop-file-utils mingw-w64-ucrt-x86_64-ca-certificates mingw-w64-ucrt-x86_64-meson git
 
       - name: Compile
         shell: msys2 {0}
@@ -72,7 +72,7 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          brew install meson pygobject3 libadwaita adwaita-icon-theme desktop-file-utils pyinstaller pillow
+          brew install meson pygobject3 desktop-file-utils pyinstaller pillow
           pip3 install --break-system-packages requests PyYAML
 
       - name: Meson Build

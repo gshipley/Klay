@@ -54,8 +54,8 @@ class BottlesSourceIterable(SourceIterable):
 
             # Get official cover path
             try:
-                # This will not work if both Cartridges and Bottles are installed via Flatpak
-                # as Cartridges can't access directories picked via Bottles' file picker portal
+                # This will not work if both Klay and Bottles are installed via Flatpak
+                # because Klay can't access directories picked via Bottles' file picker portal
                 bottles_location = Path(
                     yaml.safe_load(
                         self.source.locations.data["data.yml"].read_text("utf-8")

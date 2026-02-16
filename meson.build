@@ -10,8 +10,7 @@ project(
 
 # Qt frontend (PySide6) is loaded at runtime by the Python launcher.
 
-# Translations are broken on Windows for multiple reasons
-# gresources don't work and MSYS2 seems to have also broken the gettext package
+# Translations are currently disabled on Windows due gettext/MSYS2 issues.
 if host_machine.system() != 'windows'
   i18n = import('i18n')
 endif
@@ -27,8 +26,8 @@ binary_name = 'klay'
 data_dir_name = 'klay'
 gettext_domain = 'klay'
 app_categories = 'KDE;Game;PackageManager;'
-base_app_id = 'org.kde.Klay'
-base_prefix = '/org/kde/Klay'
+base_app_id = 'com.grantshipley.Klay'
+base_prefix = '/com/grantshipley/Klay'
 
 python_dir = join_paths(get_option('prefix'), py_installation.get_install_dir())
 pkgdatadir = join_paths(get_option('prefix'), get_option('datadir'), data_dir_name)

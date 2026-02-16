@@ -1,6 +1,6 @@
 if host_machine.system() == 'windows'
   desktop_file = configure_file(
-    input: 'org.kde.Klay.desktop.in',
+    input: 'com.grantshipley.Klay.desktop.in',
     output: app_id + '.desktop.in',
     configuration: conf,
     install: true,
@@ -9,7 +9,7 @@ if host_machine.system() == 'windows'
 else
   desktop_file = i18n.merge_file(
     input: configure_file(
-      input: 'org.kde.Klay.desktop.in',
+      input: 'com.grantshipley.Klay.desktop.in',
       output: app_id + '.desktop.in',
       configuration: conf,
     ),
@@ -30,7 +30,7 @@ endif
 
 if host_machine.system() == 'windows'
   appstream_file = configure_file(
-    input: 'org.kde.Klay.metainfo.xml.in',
+    input: 'com.grantshipley.Klay.metainfo.xml.in',
     output: app_id + '.metainfo.xml',
     configuration: conf,
     install: true,
@@ -39,7 +39,7 @@ if host_machine.system() == 'windows'
 else
   appstream_file = i18n.merge_file(
     input: configure_file(
-      input: 'org.kde.Klay.metainfo.xml.in',
+      input: 'com.grantshipley.Klay.metainfo.xml.in',
       output: app_id + '.metainfo.xml.in',
       configuration: conf,
     ),
@@ -64,7 +64,7 @@ endif
 
 install_data(
   configure_file(
-    input: 'org.kde.Klay.gschema.xml.in',
+    input: 'com.grantshipley.Klay.gschema.xml.in',
     output: app_id + '.gschema.xml',
     configuration: conf,
   ),

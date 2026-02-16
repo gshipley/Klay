@@ -1260,21 +1260,11 @@ def _run_import() -> dict[str, Any]:
     _ensure_translation_stub()
 
     try:
-        import gi
-
-        gi.require_version("Gtk", "4.0")
-        from gi.repository import Gtk
         from klay import shared
     except Exception as error:  # pylint: disable=broad-exception-caught
         errors.append(f"Import backend unavailable: {type(error).__name__}: {error}")
         return summary.as_dict()
 
-    class WinStub:
-        @staticmethod
-        def get_direction():
-            return Gtk.TextDirection.LTR
-
-    shared.win = WinStub()
     shared.import_time = int(time())
     shared.games_dir = shared.data_dir / data_dir_name / "games"
     shared.covers_dir = shared.data_dir / data_dir_name / "covers"

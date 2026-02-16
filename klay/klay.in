@@ -23,12 +23,14 @@ import gettext
 import locale
 import os
 import signal
+import subprocess
 import sys
 from pathlib import Path
 from platform import system
 
 VERSION = "@VERSION@"
 GETTEXT_DOMAIN = "@GETTEXT_DOMAIN@"
+APP_ID = "@APP_ID@"
 
 if os.name == "nt":
     PKGDATADIR = os.path.join(
@@ -43,6 +45,31 @@ build_root = script_dir.parent
 source_root = build_root.parent
 build_schema_dir = build_root / "data"
 
+
+def _ensure_build_schemas_compiled(schema_dir: Path) -> None:
+    schema_xml = schema_dir / f"{APP_ID}.gschema.xml"
+    compiled = schema_dir / "gschemas.compiled"
+
+    if not schema_xml.is_file():
+        return
+
+    needs_compile = not compiled.is_file()
+    if not needs_compile:
+        needs_compile = schema_xml.stat().st_mtime > compiled.stat().st_mtime
+
+    if not needs_compile:
+        return
+
+    try:
+        subprocess.run(  # noqa: S603
+            ["glib-compile-schemas", str(schema_dir)],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        pass
+
 # Prefer build/source paths for local development, then installed data.
 # Include build root so generated modules (e.g. shared.py) are importable.
 for path in (str(build_root), str(source_root), PKGDATADIR):
@@ -51,6 +78,7 @@ for path in (str(build_root), str(source_root), PKGDATADIR):
 
 # In local build trees, point GSettings at the compiled schema bundle.
 if "GSETTINGS_SCHEMA_DIR" not in os.environ:
+    _ensure_build_schemas_compiled(build_schema_dir)
     if (build_schema_dir / "gschemas.compiled").is_file():
         os.environ["GSETTINGS_SCHEMA_DIR"] = str(build_schema_dir)
 

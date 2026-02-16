@@ -167,7 +167,7 @@ def _app_icon() -> QIcon:
     icon = QIcon.fromTheme(shared.APP_ID)
     if not icon.isNull():
         return icon
-    icon = QIcon.fromTheme("org.kde.Klay")
+    icon = QIcon.fromTheme("com.grantshipley.Klay")
     if not icon.isNull():
         return icon
     candidate = Path(__file__).resolve().parents[2] / "Klay.png"
@@ -2923,7 +2923,7 @@ class KlayMainWindow(QMainWindow):
             (
                 "Klay\n"
                 f"Version {shared.VERSION}\n\n"
-                "A KDE-focused standalone fork of Cartridges.\n\n"
+                "A KDE-focused standalone game launcher.\n\n"
                 "License: GPL-3.0-or-later"
             ),
         )
