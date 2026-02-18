@@ -145,15 +145,30 @@ def _source_icon(source: str) -> QIcon:
         if not icon.isNull():
             return icon
 
-    custom_icon_name = {
-        "steam": "steam_logo.png",
-        "lutris": "lutris.svg",
-        "heroic": "heroic.webp",
-    }.get(source)
-    if custom_icon_name:
+    source_icon_candidates = {
+        "steam": ["steam_logo.png"],
+        "lutris": ["lutris.svg"],
+        "heroic": ["heroic.webp"],
+        "flatpak": ["flatpak-logo.png"],
+    }.get(source, [])
+    source_icon_candidates.extend(
+        [
+            f"{source}_logo.png",
+            f"{source}_logo.svg",
+            f"{source}_logo.webp",
+            f"{source}_logo.jpg",
+            f"{source}_logo.jpeg",
+            f"{source}-logo.png",
+            f"{source}-logo.svg",
+            f"{source}-logo.webp",
+            f"{source}-logo.jpg",
+            f"{source}-logo.jpeg",
+        ]
+    )
+    for icon_name in dict.fromkeys(source_icon_candidates):
         candidates = (
-            _asset_path("images", custom_icon_name),
-            _project_root() / custom_icon_name,
+            _asset_path("images", icon_name),
+            _project_root() / icon_name,
         )
         for candidate in candidates:
             if candidate.is_file():
@@ -726,6 +741,8 @@ class KlayMainWindow(QMainWindow):
         self.library = library
         self.settings = QSettings("KDE", "Klay")
         self.runtime_settings = SettingsBackend(self.library.data_dir_name)
+        self.category_definitions = self._load_category_definitions()
+        self.category_icon_paths = self._load_category_icon_paths()
         self.initial_search = initial_search
         app = QApplication.instance()
         self._default_palette = QPalette(app.palette()) if app is not None else QPalette()
@@ -1418,6 +1435,62 @@ class KlayMainWindow(QMainWindow):
                 return True
         return super().eventFilter(watched, event)
 
+    def _load_category_icon_paths(self) -> dict[str, str]:
+        raw_mapping = self.runtime_settings.get_string("category-icons", "").strip()
+        if not raw_mapping:
+            return {}
+        try:
+            parsed = json.loads(raw_mapping)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+
+        icon_paths: dict[str, str] = {}
+        for key, value in parsed.items():
+            category_key = _clean_category_name(str(key)).casefold()
+            icon_path = str(value).strip()
+            if not category_key or not icon_path:
+                continue
+            icon_paths[category_key] = icon_path
+        return icon_paths
+
+    def _load_category_definitions(self) -> dict[str, str]:
+        raw_mapping = self.runtime_settings.get_string("category-definitions", "").strip()
+        if not raw_mapping:
+            return {}
+        try:
+            parsed = json.loads(raw_mapping)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+
+        labels: dict[str, str] = {}
+        for key, value in parsed.items():
+            category_label = _clean_category_name(str(value))
+            category_key = _clean_category_name(str(key)).casefold()
+            if not category_key or not category_label:
+                continue
+            labels[category_key] = category_label
+        return labels
+
+    def _save_category_definitions(self, labels: dict[str, str]) -> None:
+        cleaned = {
+            _clean_category_name(key).casefold(): _clean_category_name(value)
+            for key, value in labels.items()
+            if _clean_category_name(key) and _clean_category_name(value)
+        }
+        self.runtime_settings.set_string("category-definitions", json.dumps(cleaned, sort_keys=True))
+        self.category_definitions = cleaned
+
+    def _category_sidebar_icon(self, category_key: str) -> QIcon:
+        if icon_path := self.category_icon_paths.get(category_key, "").strip():
+            icon = QIcon(icon_path)
+            if not icon.isNull():
+                return icon
+        return _source_icon(_category_filter_key(category_key))
+
     def _add_sidebar_item(
         self,
         *,
@@ -1436,7 +1509,10 @@ class KlayMainWindow(QMainWindow):
         item.setData(ROLE_FILTER, key)
         item.setData(ROLE_SIDEBAR_COUNT, count)
         if key:
-            item.setIcon(_source_icon(key))
+            if (category_key := _category_from_filter_key(key)) is not None:
+                item.setIcon(self._category_sidebar_icon(category_key))
+            else:
+                item.setIcon(_source_icon(key))
         self.sidebar_list.addItem(item)
 
     def _on_sidebar_changed(
@@ -1570,7 +1646,7 @@ class KlayMainWindow(QMainWindow):
         return self.game_by_id(self.active_game_id)
 
     def _category_labels_by_key(self, games: list[GameEntry] | None = None) -> dict[str, str]:
-        by_key: dict[str, str] = {}
+        by_key: dict[str, str] = dict(self.category_definitions)
         for game in games or self.games:
             for category in game.categories:
                 cleaned = _clean_category_name(category)
@@ -1599,6 +1675,62 @@ class KlayMainWindow(QMainWindow):
         game.set_value("categories", normalized)
         self.library.save_game(game)
         return True
+
+    @staticmethod
+    def _resolve_category_redirect(key: str, redirects: dict[str, str]) -> str:
+        current = key
+        seen = {current}
+        while current in redirects:
+            next_key = redirects[current]
+            if not next_key or next_key in seen:
+                break
+            seen.add(next_key)
+            current = next_key
+        return current
+
+    def _apply_category_definition_changes(
+        self,
+        *,
+        labels_by_key: dict[str, str],
+        redirects: dict[str, str],
+        deleted_keys: set[str],
+    ) -> int:
+        if not self.games:
+            return 0
+
+        normalized_labels = {
+            _clean_category_name(key).casefold(): _clean_category_name(label)
+            for key, label in labels_by_key.items()
+            if _clean_category_name(key) and _clean_category_name(label)
+        }
+        normalized_redirects = {
+            _clean_category_name(source).casefold(): _clean_category_name(target).casefold()
+            for source, target in redirects.items()
+            if _clean_category_name(source) and _clean_category_name(target)
+        }
+        normalized_deleted = {
+            _clean_category_name(key).casefold()
+            for key in deleted_keys
+            if _clean_category_name(key)
+        }
+
+        changed_games = 0
+        for game in self.games:
+            updated_categories: list[str] = []
+            for category in game.categories:
+                cleaned = _clean_category_name(category)
+                if not cleaned:
+                    continue
+                key = cleaned.casefold()
+                key = self._resolve_category_redirect(key, normalized_redirects)
+                if key in normalized_deleted and key not in normalized_labels:
+                    continue
+                updated_categories.append(normalized_labels.get(key, cleaned))
+
+            if self._set_game_categories(game, updated_categories):
+                changed_games += 1
+
+        return changed_games
 
     def set_sort_mode(self, mode: str) -> None:
         if mode not in self.sort_actions:
@@ -2924,13 +3056,37 @@ class KlayMainWindow(QMainWindow):
         self._run_worker(mode="refresh_metadata", auto=False)
 
     def open_preferences(self) -> None:
-        dialog = PreferencesDialog(self.runtime_settings, parent=self)
+        current_category_labels = self._category_labels_by_key()
+        dialog = PreferencesDialog(
+            self.runtime_settings,
+            category_labels=current_category_labels,
+            category_icons=self.category_icon_paths,
+            parent=self,
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
         dialog.apply()
+        new_category_labels = dialog.category_labels()
+        self._save_category_definitions(new_category_labels)
+        self._apply_category_definition_changes(
+            labels_by_key=new_category_labels,
+            redirects=dialog.category_redirects(),
+            deleted_keys=dialog.deleted_category_keys(),
+        )
+
+        self.category_icon_paths = self._load_category_icon_paths()
+        self.category_icon_paths = {
+            key: path
+            for key, path in self.category_icon_paths.items()
+            if key in self.category_definitions
+        }
+        self.runtime_settings.set_string(
+            "category-icons",
+            json.dumps(self.category_icon_paths, sort_keys=True),
+        )
         self._apply_color_mode()
-        self.apply_filters(select_game_id=self.selected_game_id())
+        self.reload_games()
         if dialog.refresh_requested:
             self.refresh_metadata_from_sgdb()
             return

@@ -1,7 +1,12 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+import json
+from pathlib import Path
+
+from PySide6.QtGui import QIcon
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QDialog,
     QDialogButtonBox,
@@ -9,11 +14,16 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -53,13 +63,64 @@ SOURCE_LAYOUT = (
     ("desktop", "Desktop Entries", ()),
 )
 
+CATEGORY_ICON_FILTER = "Images (*.png *.svg *.webp *.jpg *.jpeg *.bmp *.gif)"
+
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _asset_path(*segments: str) -> Path:
+    try:
+        from klay import shared
+    except Exception:
+        shared = None
+
+    if shared is not None:
+        pkgdatadir = getattr(shared, "PKGDATADIR", "")
+        if pkgdatadir:
+            candidate = Path(pkgdatadir).joinpath("assets", *segments)
+            if candidate.exists():
+                return candidate
+    return _project_root().joinpath("assets", *segments)
+
 
 class PreferencesDialog(QDialog):
-    def __init__(self, settings: SettingsBackend, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        settings: SettingsBackend,
+        *,
+        category_labels: dict[str, str] | None = None,
+        category_icons: dict[str, str] | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.settings = settings
         self.bool_widgets: dict[str, QCheckBox] = {}
         self.string_widgets: dict[str, QLineEdit] = {}
+        self.category_labels_by_key = {
+            str(key).strip().casefold(): str(label).strip()
+            for key, label in (category_labels or {}).items()
+            if str(key).strip() and str(label).strip()
+        }
+        self._category_redirects: dict[str, str] = {}
+        self._deleted_category_keys: set[str] = set()
+        self.category_icon_paths = {
+            str(key).strip().casefold(): str(path).strip()
+            for key, path in (category_icons or {}).items()
+            if str(key).strip() and str(path).strip()
+        }
+        self.category_list: QListWidget | None = None
+        self.category_built_in_list: QListWidget | None = None
+        self.category_preview_label: QLabel | None = None
+        self.category_preview_title: QLabel | None = None
+        self.category_hint_label: QLabel | None = None
+        self.category_add_button: QToolButton | None = None
+        self.category_edit_button: QToolButton | None = None
+        self.category_delete_button: QToolButton | None = None
+        self.category_set_icon_button: QPushButton | None = None
+        self.category_clear_icon_button: QPushButton | None = None
+        self.category_bundled_icons = self._bundled_category_icon_paths()
         self.refresh_requested = False
 
         self.setWindowTitle("Preferences")
@@ -74,6 +135,7 @@ class PreferencesDialog(QDialog):
         tabs.addTab(self._build_general_page(), "General")
         tabs.addTab(self._build_sources_page(), "Sources")
         tabs.addTab(self._build_import_page(), "Import")
+        tabs.addTab(self._build_categories_page(), "Categories")
         tabs.addTab(self._build_sgdb_page(), "SteamGridDB")
         tabs.addTab(self._build_igdb_page(), "IGDB")
 
@@ -98,6 +160,32 @@ class PreferencesDialog(QDialog):
         edit = QLineEdit(self.settings.get_string(key, default))
         self.string_widgets[key] = edit
         return edit
+
+    def _icon_tool_button(
+        self,
+        *,
+        icon_names: tuple[str, ...],
+        fallback_text: str,
+        tooltip: str,
+        slot,
+    ) -> QToolButton:
+        button = QToolButton()
+        button.setToolTip(tooltip)
+        button.setAutoRaise(True)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        icon = QIcon()
+        for name in icon_names:
+            candidate = QIcon.fromTheme(name)
+            if not candidate.isNull():
+                icon = candidate
+                break
+        if icon.isNull():
+            button.setText(fallback_text)
+        else:
+            button.setIcon(icon)
+            button.setIconSize(QSize(18, 18))
+        button.clicked.connect(slot)
+        return button
 
     def _build_general_page(self) -> QWidget:
         page = QWidget()
@@ -273,6 +361,471 @@ class PreferencesDialog(QDialog):
         layout.addStretch(1)
         return page
 
+    def _build_categories_page(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("categoriesPage")
+        page.setStyleSheet(
+            """
+            #categoriesPage QGroupBox {
+                border: 1px solid palette(mid);
+                border-radius: 10px;
+                margin-top: 12px;
+                padding: 12px 8px 8px 8px;
+                font-weight: 600;
+            }
+            #categoriesPage QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 6px;
+                color: #4f88c6;
+            }
+            #categoriesPage QListWidget {
+                border: 1px solid palette(mid);
+                border-radius: 8px;
+                padding: 4px;
+            }
+            #categoriesPage QLabel[role="hint"] {
+                color: palette(mid);
+            }
+            #categoriesPage QToolButton {
+                border: 1px solid palette(mid);
+                border-radius: 6px;
+                min-width: 30px;
+                min-height: 30px;
+                padding: 2px;
+            }
+            #categoriesPage QToolButton:hover {
+                border-color: palette(highlight);
+            }
+            """
+        )
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(12)
+
+        content = QHBoxLayout()
+        content.setSpacing(12)
+        layout.addLayout(content, 1)
+
+        list_panel = QGroupBox("Category Roster")
+        list_layout = QVBoxLayout(list_panel)
+        list_layout.setContentsMargins(6, 8, 6, 4)
+        list_layout.setSpacing(8)
+
+        self.category_list = QListWidget()
+        self.category_list.setAlternatingRowColors(True)
+        self.category_list.setIconSize(QSize(20, 20))
+        self.category_list.currentItemChanged.connect(
+            lambda _current, _previous: self._update_category_icon_controls()
+        )
+        list_layout.addWidget(self.category_list, 1)
+
+        roster_hint = QLabel("Categories appear in the sidebar when games use them.")
+        roster_hint.setProperty("role", "hint")
+        roster_hint.setWordWrap(True)
+        list_layout.addWidget(roster_hint)
+
+        list_controls = QHBoxLayout()
+        list_controls.setSpacing(6)
+        self.category_add_button = self._icon_tool_button(
+            icon_names=("list-add-symbolic", "list-add"),
+            fallback_text="+",
+            tooltip="Add category",
+            slot=self._add_category,
+        )
+        list_controls.addWidget(self.category_add_button)
+
+        self.category_edit_button = self._icon_tool_button(
+            icon_names=("document-edit-symbolic", "document-edit"),
+            fallback_text="E",
+            tooltip="Rename selected category",
+            slot=self._rename_category,
+        )
+        list_controls.addWidget(self.category_edit_button)
+
+        self.category_delete_button = self._icon_tool_button(
+            icon_names=("list-remove-symbolic", "list-remove", "edit-delete-symbolic"),
+            fallback_text="-",
+            tooltip="Delete selected category",
+            slot=self._delete_category,
+        )
+        list_controls.addWidget(self.category_delete_button)
+        list_controls.addStretch(1)
+        list_layout.addLayout(list_controls)
+
+        content.addWidget(list_panel, 1)
+
+        icon_panel = QGroupBox("Icon Loadout")
+        icon_layout = QVBoxLayout(icon_panel)
+        icon_layout.setContentsMargins(6, 8, 6, 4)
+        icon_layout.setSpacing(10)
+
+        self.category_preview_title = QLabel("No category selected")
+        icon_layout.addWidget(self.category_preview_title)
+
+        self.category_preview_label = QLabel("")
+        self.category_preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.category_preview_label.setFixedSize(120, 120)
+        self.category_preview_label.setStyleSheet(
+            "border: 1px solid palette(mid);"
+            "border-radius: 10px;"
+            "background: rgba(0, 0, 0, 0.18);"
+        )
+        icon_layout.addWidget(self.category_preview_label, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        self.category_hint_label = QLabel("Select an icon tile to apply it instantly.")
+        self.category_hint_label.setProperty("role", "hint")
+        self.category_hint_label.setWordWrap(True)
+        icon_layout.addWidget(self.category_hint_label)
+
+        self.category_built_in_list = QListWidget()
+        self.category_built_in_list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.category_built_in_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.category_built_in_list.setMovement(QListWidget.Movement.Static)
+        self.category_built_in_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self.category_built_in_list.setIconSize(QSize(46, 46))
+        self.category_built_in_list.setGridSize(QSize(64, 64))
+        self.category_built_in_list.setSpacing(6)
+        self.category_built_in_list.setUniformItemSizes(True)
+        self.category_built_in_list.itemClicked.connect(
+            lambda _item: self._apply_built_in_category_icon()
+        )
+        self.category_built_in_list.itemActivated.connect(
+            lambda _item: self._apply_built_in_category_icon()
+        )
+        icon_layout.addWidget(self.category_built_in_list, 1)
+
+        icon_controls = QHBoxLayout()
+        icon_controls.setSpacing(8)
+        self.category_set_icon_button = QPushButton("Upload Icon...")
+        self.category_set_icon_button.clicked.connect(self._choose_category_icon)
+        icon_controls.addWidget(self.category_set_icon_button)
+
+        self.category_clear_icon_button = QPushButton("Clear Icon")
+        self.category_clear_icon_button.clicked.connect(self._clear_category_icon)
+        icon_controls.addWidget(self.category_clear_icon_button)
+        icon_controls.addStretch(1)
+        icon_layout.addLayout(icon_controls)
+
+        content.addWidget(icon_panel, 1)
+
+        self._populate_bundled_icon_list()
+        self._refresh_category_list()
+        return page
+
+    def _bundled_category_icon_dir(self) -> Path:
+        return _asset_path("category-icons", "game-icons-popular-color")
+
+    def _bundled_category_icon_paths(self) -> list[str]:
+        icon_dir = self._bundled_category_icon_dir()
+        if not icon_dir.is_dir():
+            return []
+        candidates: list[str] = []
+        for extension in ("*.svg", "*.png", "*.webp", "*.jpg", "*.jpeg", "*.bmp", "*.gif"):
+            candidates.extend(str(path) for path in sorted(icon_dir.glob(extension)))
+        return candidates
+
+    def _selected_category_key(self) -> str | None:
+        if self.category_list is None:
+            return None
+        item = self.category_list.currentItem()
+        if item is None:
+            return None
+        key = str(item.data(Qt.ItemDataRole.UserRole) or "").strip().casefold()
+        return key or None
+
+    @staticmethod
+    def _clean_category_name(value: str) -> str:
+        return " ".join(value.split()).strip()
+
+    def _normalize_redirects(self) -> None:
+        normalized: dict[str, str] = {}
+        for source, target in list(self._category_redirects.items()):
+            src = self._clean_category_name(str(source)).casefold()
+            dst = self._clean_category_name(str(target)).casefold()
+            if not src or not dst or src == dst:
+                continue
+            visited = {src}
+            while dst in self._category_redirects and dst not in visited:
+                visited.add(dst)
+                next_target = self._clean_category_name(self._category_redirects[dst]).casefold()
+                if not next_target:
+                    break
+                dst = next_target
+            normalized[src] = dst
+        self._category_redirects = normalized
+
+    def _add_category(self) -> None:
+        name, accepted = QInputDialog.getText(
+            self,
+            "Add Category",
+            "Category name:",
+        )
+        if not accepted:
+            return
+        name = self._clean_category_name(name)
+        if not name:
+            return
+        key = name.casefold()
+        self.category_labels_by_key[key] = name
+        self._deleted_category_keys.discard(key)
+        self._refresh_category_list()
+        if self.category_list is not None:
+            for row in range(self.category_list.count()):
+                item = self.category_list.item(row)
+                if str(item.data(Qt.ItemDataRole.UserRole) or "").strip().casefold() == key:
+                    self.category_list.setCurrentRow(row)
+                    break
+
+    def _rename_category(self) -> None:
+        key = self._selected_category_key()
+        if key is None:
+            return
+        current_name = self.category_labels_by_key.get(key, key)
+        new_name, accepted = QInputDialog.getText(
+            self,
+            "Rename Category",
+            "Category name:",
+            text=current_name,
+        )
+        if not accepted:
+            return
+        new_name = self._clean_category_name(new_name)
+        if not new_name:
+            return
+        new_key = new_name.casefold()
+        if new_key == key:
+            self.category_labels_by_key[key] = new_name
+            self._refresh_category_list()
+            return
+
+        old_icon_path = self.category_icon_paths.pop(key, "").strip()
+        existing_name = self.category_labels_by_key.get(new_key)
+        self.category_labels_by_key.pop(key, None)
+        self.category_labels_by_key[new_key] = new_name if existing_name is None else existing_name
+        if old_icon_path and not self.category_icon_paths.get(new_key):
+            self.category_icon_paths[new_key] = old_icon_path
+
+        self._deleted_category_keys.discard(new_key)
+        self._deleted_category_keys.discard(key)
+        self._category_redirects[key] = new_key
+        for source, target in list(self._category_redirects.items()):
+            if target == key:
+                self._category_redirects[source] = new_key
+        self._normalize_redirects()
+
+        self._refresh_category_list()
+        if self.category_list is not None:
+            for row in range(self.category_list.count()):
+                item = self.category_list.item(row)
+                if str(item.data(Qt.ItemDataRole.UserRole) or "").strip().casefold() == new_key:
+                    self.category_list.setCurrentRow(row)
+                    break
+
+    def _delete_category(self) -> None:
+        key = self._selected_category_key()
+        if key is None:
+            return
+        label = self.category_labels_by_key.get(key, key)
+        response = QMessageBox.question(
+            self,
+            "Delete Category",
+            f"Delete category '{label}'?\n\n"
+            "This will remove the category from games when you save preferences.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return
+
+        self.category_labels_by_key.pop(key, None)
+        self.category_icon_paths.pop(key, None)
+        self._deleted_category_keys.add(key)
+
+        self._category_redirects = {
+            source: target
+            for source, target in self._category_redirects.items()
+            if source != key and target != key
+        }
+        self._normalize_redirects()
+        self._refresh_category_list()
+
+    def category_labels(self) -> dict[str, str]:
+        return dict(self.category_labels_by_key)
+
+    def category_redirects(self) -> dict[str, str]:
+        self._normalize_redirects()
+        return dict(self._category_redirects)
+
+    def deleted_category_keys(self) -> set[str]:
+        return {
+            key
+            for key in self._deleted_category_keys
+            if key and key not in self.category_labels_by_key
+        }
+
+    def _refresh_category_list(self) -> None:
+        if self.category_list is None:
+            return
+
+        selected_key = self._selected_category_key()
+        self.category_list.clear()
+
+        for key in sorted(
+            self.category_labels_by_key,
+            key=lambda item: self.category_labels_by_key[item].casefold(),
+        ):
+            item = QListWidgetItem(self.category_labels_by_key[key])
+            item.setData(Qt.ItemDataRole.UserRole, key)
+            if icon_path := self.category_icon_paths.get(key, "").strip():
+                icon = QIcon(icon_path)
+                if not icon.isNull():
+                    item.setIcon(icon)
+            self.category_list.addItem(item)
+            if key == selected_key:
+                self.category_list.setCurrentItem(item)
+
+        if self.category_list.currentItem() is None and self.category_list.count() > 0:
+            self.category_list.setCurrentRow(0)
+
+        self._update_category_icon_controls()
+
+    def _populate_bundled_icon_list(self) -> None:
+        if self.category_built_in_list is None:
+            return
+        self.category_built_in_list.clear()
+        for path in self.category_bundled_icons:
+            icon_path = str(path).strip()
+            if not icon_path:
+                continue
+            file_path = Path(icon_path)
+            item = QListWidgetItem("")
+            item.setData(Qt.ItemDataRole.UserRole, icon_path)
+            icon = QIcon(icon_path)
+            if not icon.isNull():
+                item.setIcon(icon)
+            item.setToolTip(file_path.stem.replace("-", " "))
+            item.setSizeHint(QSize(56, 56))
+            self.category_built_in_list.addItem(item)
+
+    def _selected_built_in_icon_path(self) -> str:
+        if self.category_built_in_list is None:
+            return ""
+        item = self.category_built_in_list.currentItem()
+        if item is None:
+            return ""
+        return str(item.data(Qt.ItemDataRole.UserRole) or "").strip()
+
+    def _set_preview_icon(self, icon_path: str) -> None:
+        if self.category_preview_label is None:
+            return
+        pixmap = QIcon(icon_path).pixmap(QSize(96, 96)) if icon_path else QIcon().pixmap(QSize(96, 96))
+        if pixmap.isNull():
+            fallback = QIcon.fromTheme("image-x-generic")
+            pixmap = fallback.pixmap(QSize(96, 96))
+        if pixmap.isNull():
+            self.category_preview_label.setPixmap(pixmap)
+            self.category_preview_label.setText("No\nPreview")
+            return
+        self.category_preview_label.setText("")
+        self.category_preview_label.setPixmap(pixmap)
+
+    def _sync_built_in_selection(self, icon_path: str) -> None:
+        if self.category_built_in_list is None:
+            return
+        target = str(Path(icon_path).resolve(strict=False)) if icon_path else ""
+        previous = self.category_built_in_list.blockSignals(True)
+        self.category_built_in_list.clearSelection()
+        if target:
+            for index in range(self.category_built_in_list.count()):
+                item = self.category_built_in_list.item(index)
+                candidate = str(item.data(Qt.ItemDataRole.UserRole) or "").strip()
+                if not candidate:
+                    continue
+                candidate_resolved = str(Path(candidate).resolve(strict=False))
+                if candidate_resolved == target:
+                    self.category_built_in_list.setCurrentItem(item)
+                    break
+        self.category_built_in_list.blockSignals(previous)
+
+    def _update_category_icon_controls(self) -> None:
+        selected_key = self._selected_category_key()
+        icon_path = self.category_icon_paths.get(selected_key or "", "").strip()
+        has_selection = selected_key is not None
+
+        if self.category_add_button is not None:
+            self.category_add_button.setEnabled(True)
+        if self.category_edit_button is not None:
+            self.category_edit_button.setEnabled(has_selection)
+        if self.category_delete_button is not None:
+            self.category_delete_button.setEnabled(has_selection)
+        if self.category_set_icon_button is not None:
+            self.category_set_icon_button.setEnabled(has_selection)
+        if self.category_built_in_list is not None:
+            self.category_built_in_list.setEnabled(
+                has_selection and bool(self.category_bundled_icons)
+            )
+        if self.category_preview_title is None:
+            return
+        if not has_selection:
+            self.category_preview_title.setText("No category selected")
+            self._sync_built_in_selection("")
+            self._set_preview_icon("")
+            if self.category_hint_label is not None:
+                self.category_hint_label.setText("Select a category, then pick an icon tile.")
+            if self.category_clear_icon_button is not None:
+                self.category_clear_icon_button.setEnabled(False)
+            return
+        label = self.category_labels_by_key.get(selected_key or "", selected_key or "")
+        self.category_preview_title.setText(label)
+        self._sync_built_in_selection(icon_path)
+        if self.category_hint_label is not None:
+            self.category_hint_label.setText("Select an icon tile to apply it instantly.")
+        if self.category_clear_icon_button is not None:
+            self.category_clear_icon_button.setEnabled(bool(icon_path))
+        if icon_path:
+            self._set_preview_icon(icon_path)
+            return
+        self._set_preview_icon("")
+
+    def _apply_built_in_category_icon(self) -> None:
+        key = self._selected_category_key()
+        if key is None:
+            return
+        path = self._selected_built_in_icon_path()
+        if not path:
+            return
+        self.category_icon_paths[key] = path
+        self._refresh_category_list()
+
+    def _choose_category_icon(self) -> None:
+        key = self._selected_category_key()
+        if key is None:
+            return
+
+        start_path = self.category_icon_paths.get(key, "").strip()
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "Select Category Icon",
+            start_path,
+            CATEGORY_ICON_FILTER,
+        )
+        if not path:
+            return
+
+        self.category_icon_paths[key] = path
+        self._refresh_category_list()
+
+    def _clear_category_icon(self) -> None:
+        key = self._selected_category_key()
+        if key is None:
+            return
+
+        self.category_icon_paths.pop(key, None)
+        self._refresh_category_list()
+
     def _build_sgdb_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -313,6 +866,13 @@ class PreferencesDialog(QDialog):
         layout.addWidget(self.sgdb_enabled_box)
         layout.addWidget(self.sgdb_prefer_box)
         layout.addWidget(self.sgdb_animated_box)
+        layout.addWidget(
+            self._checkbox(
+                "refresh-covers-on-metadata",
+                "Include image updates during metadata refresh",
+                default=GENERAL_BOOL_KEYS["refresh-covers-on-metadata"],
+            )
+        )
 
         self.sgdb_refresh_button = QPushButton("Refresh Metadata Now")
         self.sgdb_refresh_button.clicked.connect(self._request_refresh)
@@ -333,9 +893,12 @@ class PreferencesDialog(QDialog):
         info = QLabel(
             "IGDB requires a Twitch app Client ID and either an app access token"
             " or a Client Secret. If a secret is provided, Klay will fetch the token"
-            " automatically during metadata refresh."
+            " automatically during metadata refresh. Create/manage your Twitch app at "
+            '<a href="https://dev.twitch.tv/console/apps">dev.twitch.tv/console/apps</a>.'
         )
         info.setWordWrap(True)
+        info.setTextFormat(Qt.TextFormat.RichText)
+        info.setOpenExternalLinks(True)
         layout.addWidget(info)
 
         self.igdb_enabled_box = self._checkbox(
@@ -362,13 +925,6 @@ class PreferencesDialog(QDialog):
         self.igdb_refresh_button = QPushButton("Refresh Metadata Now")
         self.igdb_refresh_button.clicked.connect(self._request_refresh)
         layout.addWidget(self.igdb_refresh_button, alignment=Qt.AlignmentFlag.AlignLeft)
-        layout.addWidget(
-            self._checkbox(
-                "refresh-covers-on-metadata",
-                "Include cover updates during metadata refresh",
-                default=GENERAL_BOOL_KEYS["refresh-covers-on-metadata"],
-            )
-        )
 
         self.igdb_client_id_edit.textChanged.connect(self._update_igdb_state)
         self.igdb_client_secret_edit.textChanged.connect(self._update_igdb_state)
@@ -428,6 +984,25 @@ class PreferencesDialog(QDialog):
             if key in STRING_KEYS and not value:
                 value = STRING_KEYS[key]
             self.settings.set_string(key, value)
+
+        cleaned_category_icons = {
+            key.strip().casefold(): path.strip()
+            for key, path in self.category_icon_paths.items()
+            if key.strip() and path.strip()
+        }
+        cleaned_category_labels = {
+            key.strip().casefold(): self._clean_category_name(label)
+            for key, label in self.category_labels_by_key.items()
+            if key.strip() and self._clean_category_name(label)
+        }
+        self.settings.set_string(
+            "category-definitions",
+            json.dumps(cleaned_category_labels, sort_keys=True),
+        )
+        self.settings.set_string(
+            "category-icons",
+            json.dumps(cleaned_category_icons, sort_keys=True),
+        )
 
         sgdb_key = self.sgdb_key_edit.text().strip()
         self.settings.set_string("sgdb-key", sgdb_key)
