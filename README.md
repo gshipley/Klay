@@ -20,7 +20,7 @@ Klay is a standalone Qt/KDE-focused game launcher that unifies games from multip
 - Game details page with backdrop, metadata, and quick actions
 - SteamGridDB + IGDB integration for covers and metadata (Users have to provide their own API keys)
 - Playtime display on game cards when available from importer sources
-- Category management: create categories, assign games, and filter from the left nav
+- Category management: create/rename/delete categories, assign games, customize category icons, and filter from the left nav
 - Optional splash screen + startup sound
 
 ## Screenshots
@@ -136,6 +136,7 @@ Clicking outside the details card returns to the main library.
 - Enable cover lookup
 - Prefer SGDB covers
 - Allow animated SGDB covers
+- Optional: include image updates during metadata refresh
 
 `Preferences -> IGDB`:
 
@@ -144,13 +145,19 @@ Clicking outside the details card returns to the main library.
   - `Client Secret` (Klay will fetch token automatically)
 - Enable IGDB metadata enrichment
 - Refresh metadata on demand
-- Optional: include cover updates during metadata refresh
 
 ## Categories
 
-- Open a game's details and click `Categories`, or use right-click menu `Categories...`.
-- Add new category names and assign by checkbox.
-- Category filters automatically appear in the left nav with counts.
+- Assign categories per game from details view (`Categories`) or right-click menu (`Categories...`).
+- Manage category definitions in `Preferences -> Categories`:
+  - Add categories
+  - Rename categories
+  - Delete categories (with confirmation)
+- Customize category icons in `Preferences -> Categories`:
+  - Pick from built-in icon set
+  - Upload your own icon
+  - Clear a custom icon and fall back to default
+- Category filters appear in the left nav only when games are assigned to that category.
 
 ## Preferences
 
