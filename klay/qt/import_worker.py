@@ -281,7 +281,9 @@ def _download_to_temp(url: str) -> Path | None:
         return Path(open_file.name)
 
 
-def _sgdb_cover_url(name: str, api_key: str, animated: bool) -> str | None:
+def _sgdb_cover_url(
+    name: str, api_key: str, animated: bool, *, high_quality: bool = False
+) -> str | None:
     if requests is None:
         return None
 
@@ -300,18 +302,59 @@ def _sgdb_cover_url(name: str, api_key: str, animated: bool) -> str | None:
         return None
     game_id = data[0]["id"]
 
+    def _pick_image(images: list[dict[str, Any]]) -> dict[str, Any] | None:
+        best: dict[str, Any] | None = None
+        best_key: tuple[int, int, int] | None = None
+        target_area = 600 * 900
+        for image in images:
+            if not isinstance(image, dict):
+                continue
+            url = str(image.get("url") or "").strip()
+            if not url:
+                continue
+            try:
+                width = int(str(image.get("width") or "").strip() or "0")
+                height = int(str(image.get("height") or "").strip() or "0")
+            except (TypeError, ValueError):
+                width, height = 0, 0
+            area = max(0, width) * max(0, height)
+            portrait_penalty = 0 if (width > 0 and height > 0 and width < height) else 1
+            if high_quality:
+                key = (portrait_penalty, -area, 0)
+            else:
+                key = (
+                    portrait_penalty,
+                    abs(area - target_area) if area else target_area * 3,
+                    area,
+                )
+            if best_key is None or key < best_key:
+                best_key = key
+                best = image
+        return best
+
     query_sets = [animated, False] if animated else [False]
     for allow_animated in query_sets:
-        query = f"{base_url}/grids/game/{game_id}?dimensions=600x900"
-        if allow_animated:
-            query += "&types=animated"
-        grids = requests.get(query, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
-        if grids.status_code != 200:
-            continue
-        images = grids.json().get("data", [])
-        if not images:
-            continue
-        return images[0]["url"]
+        type_param = "animated" if allow_animated else "static"
+        queries: list[str] = []
+        if high_quality:
+            queries.append(f"{base_url}/grids/game/{game_id}?types={type_param}")
+        else:
+            queries.append(f"{base_url}/grids/game/{game_id}?types={type_param}&dimensions=600x900")
+            # Fallback in case strict dimensions omit all entries for a title.
+            queries.append(f"{base_url}/grids/game/{game_id}?types={type_param}")
+        for query in queries:
+            grids = requests.get(query, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
+            if grids.status_code != 200:
+                continue
+            images = grids.json().get("data", [])
+            if not images:
+                continue
+            selected = _pick_image(images)
+            if selected is None:
+                continue
+            selected_url = str(selected.get("url") or "").strip()
+            if selected_url:
+                return selected_url
 
     return None
 
@@ -728,13 +771,14 @@ def _resolve_igdb_cover_url(
     cache: dict[str, str | None],
     errors: list[str],
     game_id: str,
+    high_quality: bool = False,
 ) -> str | None:
     if requests is None:
         return None
     if "__igdb_auth_failed__" in cache:
         return None
 
-    key = game_name.strip().lower()
+    key = f"{game_name.strip().lower()}|hq:{1 if high_quality else 0}"
     if not key:
         return None
     if key in cache:
@@ -790,6 +834,7 @@ def _resolve_igdb_cover_url(
         cache[key] = None
         return None
 
+    size_token = "t_1080p" if high_quality else "t_cover_big"
     for row in payload:
         if not isinstance(row, dict):
             continue
@@ -801,7 +846,7 @@ def _resolve_igdb_cover_url(
             continue
         animated = bool(cover.get("animated"))
         ext = "gif" if animated else "jpg"
-        url = f"https://images.igdb.com/igdb/image/upload/t_1080p/{image_id}.{ext}"
+        url = f"https://images.igdb.com/igdb/image/upload/{size_token}/{image_id}.{ext}"
         cache[key] = url
         return url
 
@@ -919,12 +964,13 @@ def _attempt_cover_update(
     covers_dir: Path,
     additional_data: dict[str, Any],
     settings: SettingsBackend,
-    sgdb_cache: dict[tuple[str, bool], str | None],
+    sgdb_cache: dict[tuple[str, bool, bool], str | None],
     sgdb_state: dict[str, int | bool],
     igdb_cover_cache: dict[str, str | None],
     errors: list[str],
     allow_network_enrichment: bool = True,
     preserve_existing_cover: bool = False,
+    allow_replace_existing: bool = False,
 ) -> tuple[bool, bool]:
     had_cover_before = _has_cover(covers_dir, game_id)
     if preserve_existing_cover and had_cover_before:
@@ -934,13 +980,19 @@ def _attempt_cover_update(
     use_sgdb = allow_network_enrichment and settings.get_bool("sgdb", False)
     use_igdb = allow_network_enrichment and settings.get_bool("igdb", False)
     prefer_sgdb = settings.get_bool("sgdb-prefer", False)
+    high_quality_images = settings.get_bool("high-quality-images", False)
+
+    sgdb_blocked = (not use_sgdb) or (
+        had_cover_before and not (prefer_sgdb or allow_replace_existing)
+    )
+    igdb_blocked = (not use_igdb) or (had_cover_before and not allow_replace_existing)
 
     if (
         not additional_data.get("local_image_path")
         and not additional_data.get("local_icon_path")
         and (not allow_network_enrichment or not additional_data.get("online_cover_url"))
-        and (not use_sgdb or (had_cover_before and not prefer_sgdb))
-        and (not use_igdb or had_cover_before)
+        and sgdb_blocked
+        and igdb_blocked
     ):
         return False, had_cover_before
 
@@ -973,13 +1025,14 @@ def _attempt_cover_update(
     if (
         use_sgdb
         and not blacklisted
-        and (prefer_sgdb or not _has_cover(covers_dir, game_id))
+        and (prefer_sgdb or allow_replace_existing or not _has_cover(covers_dir, game_id))
         and (sgdb_key := settings.get_string("sgdb-key", "").strip())
     ):
         sgdb_url = _resolve_sgdb_cover_url(
             game_name=game_name,
             api_key=sgdb_key,
             animated=settings.get_bool("sgdb-animated", False),
+            high_quality=high_quality_images,
             cache=sgdb_cache,
             state=sgdb_state,
             errors=errors,
@@ -1000,7 +1053,7 @@ def _attempt_cover_update(
         and use_igdb
         and allow_network_enrichment
         and not blacklisted
-        and not _has_cover(covers_dir, game_id)
+        and (allow_replace_existing or not _has_cover(covers_dir, game_id))
     ):
         igdb_url = _resolve_igdb_cover_url(
             settings=settings,
@@ -1008,6 +1061,7 @@ def _attempt_cover_update(
             cache=igdb_cover_cache,
             errors=errors,
             game_id=game_id,
+            high_quality=high_quality_images,
         )
         if igdb_url and (tmp_file := _download_to_temp(igdb_url)):
             try:
@@ -1057,7 +1111,8 @@ def _resolve_sgdb_cover_url(
     game_name: str,
     api_key: str,
     animated: bool,
-    cache: dict[tuple[str, bool], str | None],
+    high_quality: bool,
+    cache: dict[tuple[str, bool, bool], str | None],
     state: dict[str, int | bool],
     errors: list[str],
 ) -> str | None:
@@ -1065,7 +1120,7 @@ def _resolve_sgdb_cover_url(
         return None
 
     for variant in _sgdb_name_variants(game_name):
-        cache_key = (variant.lower(), animated)
+        cache_key = (variant.lower(), animated, high_quality)
         if cache_key in cache:
             cached = cache[cache_key]
             if cached:
@@ -1073,7 +1128,12 @@ def _resolve_sgdb_cover_url(
             continue
 
         try:
-            sgdb_url = _sgdb_cover_url(variant, api_key, animated)
+            sgdb_url = _sgdb_cover_url(
+                variant,
+                api_key,
+                animated,
+                high_quality=high_quality,
+            )
         except Exception as error:  # pylint: disable=broad-exception-caught
             error_name = type(error).__name__
             if requests is not None and isinstance(error, requests.RequestException):
@@ -1108,7 +1168,7 @@ def _refresh_metadata_and_covers(
     emit_progress: Callable[..., None],
 ) -> None:
     errors = summary.errors or []
-    sgdb_cache: dict[tuple[str, bool], str | None] = {}
+    sgdb_cache: dict[tuple[str, bool, bool], str | None] = {}
     sgdb_state: dict[str, int | bool] = {"network_failures": 0, "disabled": False}
     steam_cache: dict[str, dict[str, Any] | None] = {}
     igdb_cache: dict[str, dict[str, Any] | None] = {}
@@ -1205,7 +1265,8 @@ def _refresh_metadata_and_covers(
                 sgdb_state=sgdb_state,
                 igdb_cover_cache=igdb_cover_cache,
                 errors=errors,
-                preserve_existing_cover=True,
+                preserve_existing_cover=False,
+                allow_replace_existing=True,
             )
 
         if cover_updated:

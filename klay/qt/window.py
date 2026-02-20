@@ -437,6 +437,26 @@ class SidebarDelegate(QStyledItemDelegate):
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
 
+    @staticmethod
+    def _blend_colors(base: QColor, accent: QColor, amount: float) -> QColor:
+        amount = max(0.0, min(1.0, amount))
+        keep = 1.0 - amount
+        return QColor(
+            int(round(base.red() * keep + accent.red() * amount)),
+            int(round(base.green() * keep + accent.green() * amount)),
+            int(round(base.blue() * keep + accent.blue() * amount)),
+        )
+
+    def _item_background(self, palette: QPalette, *, selected: bool) -> QColor:
+        surface = palette.alternateBase().color()
+        accent = palette.highlight().color()
+        dark_surface = surface.lightness() < 128
+        if dark_surface:
+            base = surface.lighter(130 if selected else 118)
+        else:
+            base = surface.darker(106 if selected else 103)
+        return self._blend_colors(base, accent, 0.18 if selected else 0.08)
+
     def sizeHint(self, _option: QStyleOptionViewItem, index) -> QSize:
         if index.data(ROLE_SIDEBAR_HEADING):
             return QSize(180, 26)
@@ -463,13 +483,14 @@ class SidebarDelegate(QStyledItemDelegate):
             return
 
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        if not selected:
+            parent = self.parent()
+            if isinstance(parent, QListWidget):
+                current_index = parent.currentIndex()
+                selected = current_index.isValid() and current_index.row() == index.row()
         hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
         if selected or hovered:
-            background = (
-                option.palette.midlight().color()
-                if selected
-                else option.palette.alternateBase().color()
-            )
+            background = self._item_background(option.palette, selected=selected)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(background)
             painter.drawRoundedRect(rect, 6, 6)
@@ -1970,13 +1991,23 @@ class KlayMainWindow(QMainWindow):
         igdb_client_id = self.runtime_settings.get_string("igdb-client-id", "").strip()
         igdb_token = self.runtime_settings.get_string("igdb-key", "").strip()
         igdb_secret = self.runtime_settings.get_string("igdb-client-secret", "").strip()
+        high_quality_images = self.runtime_settings.get_bool(
+            "high-quality-images", GENERAL_BOOL_KEYS["high-quality-images"]
+        )
         sgdb_sig = api_key[:10] if api_key else ""
         igdb_sig = (
             f"{igdb_client_id[:10]}:{(igdb_token or igdb_secret)[:10]}"
             if igdb_client_id and (igdb_token or igdb_secret)
             else ""
         )
-        cache_key = (game.name.strip().lower(), sgdb_sig, igdb_sig, True, "v2")
+        cache_key = (
+            game.name.strip().lower(),
+            sgdb_sig,
+            igdb_sig,
+            True,
+            high_quality_images,
+            "v3",
+        )
         cache_ttl_s = 300.0
         picker_button = self.details_cover_picker_btn
         picker_button_original_text = picker_button.text()
@@ -2181,6 +2212,7 @@ class KlayMainWindow(QMainWindow):
                         api_key=api_key,
                         animated=True,
                         limit=60,
+                        high_quality=high_quality_images,
                     )
                 )
             if igdb_client_id and (igdb_token or igdb_secret):
@@ -2191,6 +2223,7 @@ class KlayMainWindow(QMainWindow):
                         access_token=igdb_token,
                         client_secret=igdb_secret,
                         limit=24,
+                        high_quality=high_quality_images,
                     )
                 )
 

@@ -655,6 +655,7 @@ class GameLibrary:
         api_key: str,
         animated: bool = False,
         limit: int = 20,
+        high_quality: bool = False,
     ) -> list[dict[str, Any]]:
         if requests is None or not game_name.strip() or not api_key.strip():
             return []
@@ -681,6 +682,13 @@ class GameLibrary:
             " pts",
         )
 
+        def _normalize_match_text(value: str) -> str:
+            # Ignore punctuation/separators so "Cronos The New Dawn" matches
+            # "Cronos: The New Dawn" when ranking SGDB autocomplete results.
+            lowered = value.strip().lower()
+            flattened = re.sub(r"[^0-9a-z]+", " ", lowered)
+            return " ".join(flattened.split())
+
         def _score_name(query: str, row_name: str) -> int:
             query_norm = query.strip().lower()
             row_norm = row_name.strip().lower()
@@ -692,6 +700,15 @@ class GameLibrary:
                 return 1
             if query_norm in row_norm:
                 return 2
+            query_flat = _normalize_match_text(query_norm)
+            row_flat = _normalize_match_text(row_norm)
+            if query_flat and row_flat:
+                if row_flat == query_flat:
+                    return 0
+                if row_flat.startswith(query_flat):
+                    return 1
+                if query_flat in row_flat:
+                    return 2
             row_alt = row_norm.replace("iii", "3").replace(" ii", " 2").replace(" iv", " 4")
             query_alt = query_norm.replace("iii", "3").replace(" ii", " 2").replace(" iv", " 4")
             if row_alt == query_alt:
@@ -739,7 +756,7 @@ class GameLibrary:
             candidate_rank.items(),
             key=lambda pair: (pair[1][0], pair[1][1], pair[0]),
         )
-        candidate_ids = [game_id for game_id, _rank in ranked_candidates][:8]
+        candidate_ids = [game_id for game_id, _rank in ranked_candidates][:20]
         candidate_scores = {game_id: rank[0] for game_id, rank in ranked_candidates}
 
         if not candidate_ids:
@@ -749,12 +766,11 @@ class GameLibrary:
         animated_count = 0
 
         def _fetch_grid_page(game_id: str, type_param: str, page: int) -> list[dict[str, Any]]:
-            query = (
-                f"{base_url}/grids/game/{game_id}"
-                "?"
-                + f"types={type_param}"
-                + f"&page={page}"
-            )
+            query = f"{base_url}/grids/game/{game_id}?types={type_param}"
+            # SGDB returns a richer default result set when page is omitted.
+            # Keep page 1 unpaged, then request explicit pages only as needed.
+            if page > 1:
+                query += f"&page={page}"
             try:
                 grids = requests.get(query, headers=headers, timeout=6)
                 grids.raise_for_status()
@@ -787,7 +803,18 @@ class GameLibrary:
         ) -> int:
             nonlocal animated_count
             appended = 0
-            for image in images:
+            ordered_images = list(images)
+            if high_quality:
+                def _image_area(item: dict[str, Any]) -> int:
+                    try:
+                        width_v = int(str(item.get("width", "")).strip() or "0")
+                        height_v = int(str(item.get("height", "")).strip() or "0")
+                    except (TypeError, ValueError):
+                        return 0
+                    return max(0, width_v) * max(0, height_v)
+                ordered_images.sort(key=_image_area, reverse=True)
+
+            for image in ordered_images:
                 url = str(image.get("url", "")).strip()
                 if not url or url in seen_urls:
                     continue
@@ -960,6 +987,7 @@ class GameLibrary:
         access_token: str = "",
         client_secret: str = "",
         limit: int = 6,
+        high_quality: bool = False,
     ) -> list[dict[str, Any]]:
         if requests is None:
             return []
@@ -982,6 +1010,7 @@ class GameLibrary:
         options: list[dict[str, Any]] = []
         seen_urls: set[str] = set()
         target_limit = max(1, int(limit))
+        size_token = "t_1080p" if high_quality else "t_cover_big"
         for variant in self._search_name_variants(game_name):
             if len(options) >= target_limit:
                 break
@@ -1032,7 +1061,7 @@ class GameLibrary:
                     continue
                 animated = bool(cover.get("animated"))
                 ext = "gif" if animated else "jpg"
-                url = f"https://images.igdb.com/igdb/image/upload/t_1080p/{image_id}.{ext}"
+                url = f"https://images.igdb.com/igdb/image/upload/{size_token}/{image_id}.{ext}"
                 if url in seen_urls:
                     continue
                 seen_urls.add(url)

@@ -238,6 +238,14 @@ class PreferencesDialog(QDialog):
         )
         layout.addWidget(
             self._checkbox(
+                "refresh-covers-on-metadata",
+                "Include image updates during metadata refresh (may overwrite existing covers)",
+                default=GENERAL_BOOL_KEYS["refresh-covers-on-metadata"],
+                tooltip="When enabled, metadata refresh can replace existing cover images with new provider matches.",
+            )
+        )
+        layout.addWidget(
+            self._checkbox(
                 "remove-missing",
                 "Mark missing imported games as removed",
                 default=GENERAL_BOOL_KEYS["remove-missing"],
@@ -866,13 +874,6 @@ class PreferencesDialog(QDialog):
         layout.addWidget(self.sgdb_enabled_box)
         layout.addWidget(self.sgdb_prefer_box)
         layout.addWidget(self.sgdb_animated_box)
-        layout.addWidget(
-            self._checkbox(
-                "refresh-covers-on-metadata",
-                "Include image updates during metadata refresh",
-                default=GENERAL_BOOL_KEYS["refresh-covers-on-metadata"],
-            )
-        )
 
         self.sgdb_refresh_button = QPushButton("Refresh Metadata Now")
         self.sgdb_refresh_button.clicked.connect(self._request_refresh)

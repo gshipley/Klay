@@ -6,7 +6,7 @@
       <default>false</default>
     </key>
     <key name="auto-import" type="b">
-        <default>false</default>
+        <default>true</default>
     </key>
     <key name="exit-after-launch" type="b">
       <default>false</default>
