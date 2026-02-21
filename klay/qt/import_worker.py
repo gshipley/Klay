@@ -901,7 +901,9 @@ def _resolve_steam_online_data(
 
     appid: str | None = None
     if steam_appid is not None:
-        appid = str(steam_appid).strip() or None
+        candidate = str(steam_appid).strip()
+        if candidate.isdigit():
+            appid = candidate
 
     if appid is None and allow_name_search:
         name_key = game_name.strip().lower()
@@ -921,6 +923,9 @@ def _resolve_steam_online_data(
             if appid is None:
                 cache[f"name:{name_key}"] = None
                 return None
+
+    if appid is None:
+        return None
 
     cache_key = f"appid:{appid}"
     if cache_key in cache:

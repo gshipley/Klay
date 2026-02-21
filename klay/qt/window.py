@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
+from functools import lru_cache
 from html import escape
 import json
 import os
@@ -82,27 +83,30 @@ ROLE_PLAYTIME = Qt.ItemDataRole.UserRole + 7
 COVER_SIZE = QSize(200, 300)
 CATEGORY_FILTER_PREFIX = "category:"
 ALL_GAMES_EXCLUDED_SOURCES_DEFAULT = frozenset({"geforcenow"})
-GEFORCENOW_STATE_DIR = Path.home() / ".var/app/com.nvidia.geforcenow/.local/state/NVIDIA/GeForceNOW"
+GEFORCENOW_STATE_SUBPATH = Path(
+    ".var/app/com.nvidia.geforcenow/.local/state/NVIDIA/GeForceNOW"
+)
 GEFORCENOW_LOG_GLOBS = (
     "console.log*",
     "CxNative_GeForceNOW*.log",
     "geronimo.log*",
+    "debug.log*",
+    "logs/gfn_reliability_monitor.log*",
 )
 GEFORCENOW_STREAM_END_MARKERS = (
     "onstreamingterminated",
+    "streaming terminated",
     "stream ended",
     "notifygameend",
     "streamer_exit",
     "streaming ended - resuming patch expiry checks",
 )
 GEFORCENOW_STREAM_START_MARKERS = (
-    "game_launch_event",
     "onstreamingbegin",
     "streaming started",
     "advancing to state: streaming",
-    "streamer_start",
-    "streamerloading",
 )
+GEFORCENOW_STREAM_END_MIN_SECONDS = 6.0
 
 
 def _fmt_timestamp(timestamp: int) -> str:
@@ -160,6 +164,56 @@ def _asset_path(*segments: str) -> Path:
         if candidate.exists():
             return candidate
     return _project_root().joinpath("assets", *segments)
+
+
+@lru_cache(maxsize=1)
+def _host_home_dir() -> Path:
+    host_home = os.getenv("HOST_HOME", "").strip()
+    if host_home:
+        candidate = Path(host_home).expanduser()
+        if candidate.is_absolute():
+            return candidate
+
+    host_data_dir = getattr(shared, "host_data_dir", None)
+    if isinstance(host_data_dir, Path):
+        expanded = host_data_dir.expanduser()
+        if (
+            expanded.is_absolute()
+            and expanded.name == "share"
+            and expanded.parent.name == ".local"
+        ):
+            return expanded.parent.parent
+
+    home = Path.home()
+    if os.getenv("FLATPAK_ID"):
+        marker = "/.var/app/"
+        home_str = str(home)
+        marker_index = home_str.find(marker)
+        if marker_index > 0:
+            return Path(home_str[:marker_index])
+        try:
+            host_home_lookup = subprocess.run(  # noqa: S603
+                ["flatpak-spawn", "--host", "sh", "-lc", 'printf "%s" "$HOME"'],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if host_home_lookup.returncode == 0:
+                host_home_value = host_home_lookup.stdout.strip()
+                if host_home_value:
+                    return Path(host_home_value).expanduser()
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+    return home
+
+
+def _geforcenow_state_dirs() -> tuple[Path, ...]:
+    host_state_dir = _host_home_dir() / GEFORCENOW_STATE_SUBPATH
+    sandbox_state_dir = Path.home() / GEFORCENOW_STATE_SUBPATH
+    if sandbox_state_dir == host_state_dir:
+        return (host_state_dir,)
+    return (host_state_dir, sandbox_state_dir)
 
 
 def _source_icon(source: str) -> QIcon:
@@ -819,7 +873,10 @@ class KlayMainWindow(QMainWindow):
         self._geforcenow_log_files: list[Path] = []
         self._geforcenow_idle_polls = 0
         self._geforcenow_stream_started = False
+        self._geforcenow_stream_started_at = 0.0
         self._geforcenow_monitor_started_at = 0.0
+        self.import_status_label: QLabel | None = None
+        self.import_status_progress_bar: QProgressBar | None = None
 
         self.setWindowTitle("Klay")
         icon = _app_icon()
@@ -885,7 +942,18 @@ class KlayMainWindow(QMainWindow):
 
         self.splitter.setSizes([235, 950])
         self.setCentralWidget(central)
-        self.statusBar().showMessage("Ready")
+        status_bar = self.statusBar()
+        self.import_status_label = QLabel("")
+        self.import_status_label.setVisible(False)
+        self.import_status_progress_bar = QProgressBar()
+        self.import_status_progress_bar.setRange(0, 0)
+        self.import_status_progress_bar.setValue(0)
+        self.import_status_progress_bar.setFixedWidth(220)
+        self.import_status_progress_bar.setTextVisible(False)
+        self.import_status_progress_bar.setVisible(False)
+        status_bar.addPermanentWidget(self.import_status_label)
+        status_bar.addPermanentWidget(self.import_status_progress_bar)
+        status_bar.showMessage("Ready")
         self._apply_styles()
 
     def _build_library_page(self) -> QWidget:
@@ -2605,14 +2673,20 @@ class KlayMainWindow(QMainWindow):
 
     def _refresh_geforcenow_log_files(self, *, initialize_new_offsets: bool) -> None:
         discovered: list[Path] = []
-        if GEFORCENOW_STATE_DIR.is_dir():
+        state_dirs = _geforcenow_state_dirs()
+        for state_dir in state_dirs:
+            if not state_dir.is_dir():
+                continue
             for pattern in GEFORCENOW_LOG_GLOBS:
-                discovered.extend(sorted(GEFORCENOW_STATE_DIR.glob(pattern)))
+                discovered.extend(sorted(state_dir.glob(pattern)))
         if not discovered:
-            discovered = [
-                GEFORCENOW_STATE_DIR / "console.log",
-                GEFORCENOW_STATE_DIR / "CxNative_GeForceNOW.log",
-            ]
+            for state_dir in state_dirs:
+                discovered.extend(
+                    [
+                        state_dir / "console.log",
+                        state_dir / "CxNative_GeForceNOW.log",
+                    ]
+                )
 
         ordered_unique: list[Path] = []
         seen: set[Path] = set()
@@ -2644,6 +2718,7 @@ class KlayMainWindow(QMainWindow):
         self._geforcenow_log_offsets = {}
         self._geforcenow_idle_polls = 0
         self._geforcenow_stream_started = False
+        self._geforcenow_stream_started_at = 0.0
         self._geforcenow_monitor_started_at = time.monotonic()
         self._refresh_geforcenow_log_files(initialize_new_offsets=True)
 
@@ -2662,6 +2737,7 @@ class KlayMainWindow(QMainWindow):
         self._geforcenow_log_files = []
         self._geforcenow_idle_polls = 0
         self._geforcenow_stream_started = False
+        self._geforcenow_stream_started_at = 0.0
         self._geforcenow_monitor_started_at = 0.0
 
     def _force_kill_geforcenow_process(self, process: subprocess.Popen[Any]) -> None:
@@ -2741,8 +2817,19 @@ class KlayMainWindow(QMainWindow):
             lower_chunk = chunk.casefold()
             for line in lower_chunk.splitlines():
                 if any(marker in line for marker in GEFORCENOW_STREAM_START_MARKERS):
-                    self._geforcenow_stream_started = True
-                stream_end_armed = self._geforcenow_stream_started or (
+                    if not self._geforcenow_stream_started:
+                        self._geforcenow_stream_started = True
+                        self._geforcenow_stream_started_at = time.monotonic()
+
+                stream_started_ready = (
+                    self._geforcenow_stream_started
+                    and self._geforcenow_stream_started_at > 0
+                    and (
+                        time.monotonic() - self._geforcenow_stream_started_at
+                    )
+                    >= GEFORCENOW_STREAM_END_MIN_SECONDS
+                )
+                stream_end_armed = stream_started_ready or (
                     self._geforcenow_monitor_started_at > 0
                     and (time.monotonic() - self._geforcenow_monitor_started_at) >= 25
                 )
@@ -3102,6 +3189,36 @@ class KlayMainWindow(QMainWindow):
         self.add_game_action.setEnabled(not importing)
         self.empty_import_button.setEnabled(not importing)
 
+    def _show_import_status_progress(self, *, mode: str) -> None:
+        if self.import_status_label is None or self.import_status_progress_bar is None:
+            return
+        text = "Refreshing metadata" if mode == "refresh_metadata" else "Importing games"
+        self.import_status_label.setText(text)
+        self.import_status_label.setVisible(True)
+        self.import_status_progress_bar.setRange(0, 0)
+        self.import_status_progress_bar.setValue(0)
+        self.import_status_progress_bar.setVisible(True)
+
+    def _update_import_status_progress(self, payload: dict[str, Any]) -> None:
+        if self.import_status_progress_bar is None or not self.import_status_progress_bar.isVisible():
+            return
+        processed = payload.get("processed")
+        total = payload.get("total")
+        if isinstance(processed, int) and isinstance(total, int) and total > 0:
+            self.import_status_progress_bar.setRange(0, total)
+            self.import_status_progress_bar.setValue(max(0, min(processed, total)))
+        else:
+            self.import_status_progress_bar.setRange(0, 0)
+
+    def _hide_import_status_progress(self) -> None:
+        if self.import_status_label is not None:
+            self.import_status_label.setVisible(False)
+            self.import_status_label.setText("")
+        if self.import_status_progress_bar is not None:
+            self.import_status_progress_bar.setVisible(False)
+            self.import_status_progress_bar.setRange(0, 0)
+            self.import_status_progress_bar.setValue(0)
+
     def _close_import_progress(self) -> None:
         if self.import_progress_dialog is None:
             return
@@ -3129,6 +3246,7 @@ class KlayMainWindow(QMainWindow):
     def _on_import_thread_progress(self, payload: dict[str, Any], mode: str) -> None:
         if self.import_progress_dialog is not None:
             self.import_progress_dialog.update_stats(payload)
+        self._update_import_status_progress(payload)
 
         game_id = payload.get("game_id")
         if payload.get("cover_updated") and isinstance(game_id, str) and game_id:
@@ -3300,6 +3418,7 @@ class KlayMainWindow(QMainWindow):
     def _on_import_thread_finished(self) -> None:
         self._set_import_in_progress(False)
         self._close_import_progress()
+        self._hide_import_status_progress()
         if self.import_thread is not None:
             self.import_thread.deleteLater()
         self.import_thread = None
@@ -3313,6 +3432,7 @@ class KlayMainWindow(QMainWindow):
             return
 
         self._set_import_in_progress(True)
+        self._show_import_status_progress(mode=mode)
         include_cover_refresh = self.runtime_settings.get_bool(
             "refresh-covers-on-metadata", False
         )

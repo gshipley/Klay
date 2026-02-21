@@ -20,6 +20,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Get tag and app version
         id: version
@@ -43,8 +45,38 @@ jobs:
 
       - name: Create release notes
         run: |
+          tag="${{ steps.version.outputs.tag_name }}"
+          previous_tag="$(
+            git tag --list 'v*' --sort=-version:refname \
+              | grep -Fxv "${tag}" \
+              | head -n 1
+          )"
+          if [ -n "${previous_tag}" ]; then
+            changes="$(
+              git log --pretty='- %s' "${previous_tag}..${tag}" \
+                | sed '/^-[[:space:]]*$/d' \
+                | head -n 25
+            )"
+          else
+            changes="$(
+              git log --pretty='- %s' "${tag}" \
+                | sed '/^-[[:space:]]*$/d' \
+                | head -n 25
+            )"
+          fi
+          if [ -z "${changes}" ]; then
+            changes="- Maintenance update"
+          fi
+
           {
-            echo "Klay release"
+            echo "Klay ${tag}"
+            echo
+            if [ -n "${previous_tag}" ]; then
+              echo "## Changes Since ${previous_tag}"
+            else
+              echo "## Highlights"
+            fi
+            printf '%s\n' "${changes}"
             echo
             echo "## Download"
             echo "- \`com.grantshipley.Klay.Devel.flatpak\`"
