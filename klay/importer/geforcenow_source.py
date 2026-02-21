@@ -1,0 +1,669 @@
+# geforcenow_source.py
+#
+# Copyright 2026
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import shutil
+import subprocess
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from time import time
+from typing import Any
+from urllib.parse import quote
+import requests
+from requests.exceptions import RequestException
+
+from klay import shared
+from klay.game import Game
+from klay.importer.source import Source, SourceIterable
+from klay.utils.steam import SteamFileHelper, SteamInvalidManifestError
+
+GFN_APPS_ENDPOINT = "https://games.geforce.com/graphql"
+GFN_APPS_FALLBACK_ENDPOINT = "https://api-prod.nvidia.com/services/gfngames/v1/gameList"
+GFN_MAX_PAGES = 20
+GFN_CACHE_TTL_SECONDS = 6 * 60 * 60
+REQUEST_TIMEOUT_SECONDS = 12
+GFN_LIBRARY_OWNED_STATUSES = {"MANUAL", "PLATFORM_SYNC", "OWNED", "STEAM_SYNC"}
+
+
+class GeForceNowSourceIterable(SourceIterable):
+    source: "GeForceNowSource"
+
+    def _installed_steam_games(self) -> tuple[dict[str, str], Path | None]:
+        from klay.importer.steam_source import SteamSource, SteamSourceIterable
+
+        steam_games: dict[str, str] = {}
+        steam_root: Path | None = None
+        try:
+            steam_source = SteamSource()
+            steam_iterable = SteamSourceIterable(steam_source)
+            manifests = steam_iterable.get_manifests()
+            steam_root = steam_source.locations.data.root
+        except Exception as error:  # pylint: disable=broad-exception-caught
+            logging.debug(
+                "GeForce NOW: unable to read installed Steam games", exc_info=error
+            )
+            return steam_games, steam_root
+
+        steam = SteamFileHelper()
+        for manifest in manifests:
+            try:
+                local_data = steam.get_manifest_data(manifest)
+            except (OSError, SteamInvalidManifestError):
+                continue
+
+            try:
+                state_flags = int(str(local_data.get("stateflags", "0")).strip())
+            except ValueError:
+                continue
+
+            if not (state_flags & 4):
+                continue
+
+            appid = str(local_data.get("appid", "")).strip()
+            if not appid.isdigit():
+                continue
+
+            name = str(local_data.get("name", "")).strip()
+            if appid not in steam_games:
+                steam_games[appid] = name or f"Steam {appid}"
+
+        return steam_games, steam_root
+
+    @staticmethod
+    def _steam_id_from_loginusers(steam_root: Path | None) -> str | None:
+        if steam_root is None:
+            return None
+
+        loginusers_path = steam_root / "config" / "loginusers.vdf"
+        if not loginusers_path.is_file():
+            return None
+
+        try:
+            contents = loginusers_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return None
+
+        users = re.findall(
+            r'"(?P<steamid>\d{17})"\s*\{(?P<body>.*?)\n\s*\}',
+            contents,
+            flags=re.DOTALL,
+        )
+        if not users:
+            return None
+
+        def _has_flag(body: str, key: str) -> bool:
+            return re.search(rf'"{re.escape(key)}"\s+"1"', body) is not None
+
+        for steam_id, body in users:
+            if _has_flag(body, "MostRecent"):
+                return steam_id
+
+        for steam_id, body in users:
+            if _has_flag(body, "AllowAutoLogin"):
+                return steam_id
+
+        return users[0][0]
+
+    @staticmethod
+    def _parse_local_owned_steam_ids(contents: str) -> set[str]:
+        token_re = re.compile(r'"([^"\n]*)"|([{}])')
+        stack: list[str] = []
+        pending_key: str | None = None
+        appids: set[str] = set()
+
+        for match in token_re.finditer(contents):
+            quoted = match.group(1)
+            brace = match.group(2)
+
+            if brace == "{":
+                if pending_key is not None:
+                    lower_stack = [part.lower() for part in stack]
+                    is_appid = pending_key.isdigit() and int(pending_key) > 9
+                    if is_appid:
+                        if (
+                            len(lower_stack) >= 4
+                            and lower_stack[-4:] == ["software", "valve", "steam", "apps"]
+                        ):
+                            appids.add(pending_key)
+                        elif lower_stack and lower_stack[-1] == "apptickets":
+                            appids.add(pending_key)
+
+                    stack.append(pending_key)
+                    pending_key = None
+                continue
+
+            if brace == "}":
+                pending_key = None
+                if stack:
+                    stack.pop()
+                continue
+
+            if quoted is None:
+                continue
+
+            if pending_key is None:
+                pending_key = quoted
+                continue
+
+            pending_key = None
+
+        return appids
+
+    @staticmethod
+    def _local_steam_owned_games(
+        steam_root: Path | None,
+        steam_catalog: dict[str, dict[str, str]],
+    ) -> dict[str, str]:
+        if steam_root is None:
+            return {}
+
+        userdata_dir = steam_root / "userdata"
+        if not userdata_dir.is_dir():
+            return {}
+
+        steam_games: dict[str, str] = {}
+        for config_path in userdata_dir.glob("*/config/localconfig.vdf"):
+            if not config_path.is_file():
+                continue
+            try:
+                contents = config_path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            for appid in GeForceNowSourceIterable._parse_local_owned_steam_ids(contents):
+                if appid in steam_catalog and appid not in steam_games:
+                    steam_games[appid] = steam_catalog[appid]["title"]
+        return steam_games
+
+    @staticmethod
+    def _public_steam_games(steam_root: Path | None) -> dict[str, str]:
+        steam_id = GeForceNowSourceIterable._steam_id_from_loginusers(steam_root)
+        if not steam_id:
+            return {}
+
+        url = f"https://steamcommunity.com/profiles/{steam_id}/games/?xml=1"
+        try:
+            response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
+            response.raise_for_status()
+        except RequestException:
+            return {}
+
+        xml_data = response.text.strip()
+        if not xml_data.startswith("<?xml"):
+            return {}
+
+        try:
+            root = ET.fromstring(xml_data)
+        except ET.ParseError:
+            return {}
+
+        if root.tag != "gamesList":
+            return {}
+
+        steam_games: dict[str, str] = {}
+        for game_node in root.findall("./games/game"):
+            appid = (game_node.findtext("appID") or "").strip()
+            if not appid.isdigit():
+                continue
+            name = (game_node.findtext("name") or "").strip()
+            steam_games[appid] = name or f"Steam {appid}"
+        return steam_games
+
+    @staticmethod
+    def _extract_json_payload(blob: bytes) -> dict[str, Any] | None:
+        marker = b'{"data":{"panels"'
+        start = blob.find(marker)
+        if start < 0:
+            return None
+
+        depth = 0
+        in_string = False
+        escaped = False
+        end: int | None = None
+
+        for index in range(start, len(blob)):
+            byte = blob[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif byte == 0x5C:
+                    escaped = True
+                elif byte == 0x22:
+                    in_string = False
+                continue
+
+            if byte == 0x22:
+                in_string = True
+            elif byte == 0x7B:
+                depth += 1
+            elif byte == 0x7D:
+                depth -= 1
+                if depth == 0:
+                    end = index + 1
+                    break
+
+        if end is None:
+            return None
+
+        try:
+            payload = json.loads(blob[start:end].decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _cached_gfn_library_games(
+        self,
+        steam_catalog: dict[str, dict[str, str]],
+    ) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+        cache_storage_root = self.source.gfn_cache_storage_path()
+        if cache_storage_root is None or not cache_storage_root.is_dir():
+            return {}, {}
+
+        by_gfn_id: dict[str, tuple[str, dict[str, str]]] = {}
+        for appid, entry in steam_catalog.items():
+            gfn_id = str(entry.get("gfn_id") or "").strip()
+            if gfn_id:
+                by_gfn_id[gfn_id] = (appid, entry)
+
+        owned_games: dict[str, str] = {}
+        route_overrides: dict[str, dict[str, str]] = {}
+
+        for cache_file in cache_storage_root.rglob("*"):
+            if not cache_file.is_file():
+                continue
+            try:
+                blob = cache_file.read_bytes()
+            except OSError:
+                continue
+
+            if b"requestType=panels/Library" not in blob:
+                continue
+            payload = self._extract_json_payload(blob)
+            if payload is None:
+                continue
+
+            panels = payload.get("data", {}).get("panels")
+            if not isinstance(panels, list):
+                continue
+
+            for panel in panels:
+                if not isinstance(panel, dict) or panel.get("name") != "LIBRARY":
+                    continue
+                sections = panel.get("sections")
+                if not isinstance(sections, list):
+                    continue
+                for section in sections:
+                    if not isinstance(section, dict):
+                        continue
+                    items = section.get("items")
+                    if not isinstance(items, list):
+                        continue
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        app = item.get("app")
+                        if not isinstance(app, dict):
+                            continue
+
+                        gfn_id = str(app.get("id") or "").strip()
+                        if not gfn_id:
+                            continue
+                        appid_entry = by_gfn_id.get(gfn_id)
+                        if appid_entry is None:
+                            continue
+
+                        appid, catalog_entry = appid_entry
+                        title = str(app.get("title") or "").strip()
+                        variants = app.get("variants")
+                        if not isinstance(variants, list):
+                            continue
+
+                        for variant in variants:
+                            if not isinstance(variant, dict):
+                                continue
+                            app_store = str(variant.get("appStore") or "").upper()
+                            if app_store != "STEAM":
+                                continue
+
+                            gfn_state = variant.get("gfn")
+                            if not isinstance(gfn_state, dict):
+                                continue
+                            library_state = gfn_state.get("library")
+                            if not isinstance(library_state, dict):
+                                continue
+
+                            status = str(library_state.get("status") or "").upper()
+                            selected = bool(library_state.get("selected"))
+                            if not selected and status not in GFN_LIBRARY_OWNED_STATUSES:
+                                continue
+
+                            if appid not in owned_games:
+                                owned_games[appid] = (
+                                    title or str(catalog_entry.get("title") or f"Steam {appid}")
+                                )
+
+                            short_name = str(variant.get("shortName") or "").strip()
+                            variant_id = str(variant.get("id") or "").strip()
+                            route_overrides[appid] = {
+                                "short_name": short_name
+                                or (variant_id if variant_id.isdigit() else "game_gfn_pc"),
+                                "parent_game_id": gfn_id,
+                            }
+
+        return owned_games, route_overrides
+
+    def __iter__(self):
+        if not self.source.gfn_client_detected:
+            return
+
+        steam_catalog = self.source.steam_catalog()
+        if not steam_catalog:
+            return
+
+        cached_library_games, route_overrides = self._cached_gfn_library_games(
+            steam_catalog
+        )
+        installed_steam_games, steam_root = self._installed_steam_games()
+        local_steam_games = self._local_steam_owned_games(steam_root, steam_catalog)
+        public_steam_games = {}
+        if not cached_library_games and not local_steam_games:
+            public_steam_games = self._public_steam_games(steam_root)
+
+        owned_games: dict[str, str] = dict(cached_library_games)
+        owned_games.update(local_steam_games)
+        owned_games.update(public_steam_games)
+        owned_games.update(installed_steam_games)
+        if not owned_games:
+            return
+
+        for appid, name in sorted(
+            owned_games.items(),
+            key=lambda row: (row[1].casefold(), int(row[0])),
+        ):
+            catalog_entry = steam_catalog.get(appid)
+            if catalog_entry is None:
+                continue
+
+            values = {
+                "source": self.source.source_id,
+                "added": shared.import_time,
+                "name": name or catalog_entry["title"],
+                "game_id": self.source.game_id_format.format(game_id=appid),
+                "executable": self.source.make_executable(
+                    cms_id=catalog_entry["cms_id"],
+                    short_name=route_overrides.get(appid, {}).get(
+                        "short_name", "game_gfn_pc"
+                    ),
+                    parent_game_id=route_overrides.get(appid, {}).get(
+                        "parent_game_id", catalog_entry["gfn_id"]
+                    ),
+                ),
+            }
+            game = Game(values)
+            additional_data = {
+                "steam_appid": appid,
+                "online_cover_url": f"https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/library_600x900.jpg",
+            }
+            yield game, additional_data
+
+
+class GeForceNowSource(Source):
+    source_id = "geforcenow"
+    name = _("GeForce NOW")
+    available_on = {"linux"}
+    iterable_class = GeForceNowSourceIterable
+    flatpak_app_id = "com.nvidia.geforcenow"
+
+    locations: tuple[()]
+    _steam_catalog_cache: dict[str, dict[str, str]] | None
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.locations = ()
+        self._steam_catalog_cache = None
+
+    @property
+    def gfn_client_detected(self) -> bool:
+        install_candidates = (
+            shared.host_data_dir / "flatpak" / "app" / self.flatpak_app_id,
+            shared.data_dir / "flatpak" / "app" / self.flatpak_app_id,
+            Path("/var/lib/flatpak/app") / self.flatpak_app_id,
+        )
+        if any(path.is_dir() for path in install_candidates):
+            return True
+
+        if (flatpak := shutil.which("flatpak")) is None:
+            return False
+        try:
+            process = subprocess.run(
+                [flatpak, "info", self.flatpak_app_id],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=3,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return process.returncode == 0
+
+    @property
+    def _cache_path(self) -> Path:
+        cache_dir = shared.cache_dir / shared.DATA_DIR_NAME
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return cache_dir / "geforcenow-catalog-steam.json"
+
+    def gfn_cache_storage_path(self) -> Path | None:
+        candidates = (
+            shared.home
+            / ".var"
+            / "app"
+            / self.flatpak_app_id
+            / ".local"
+            / "state"
+            / "NVIDIA"
+            / "GeForceNOW"
+            / "CefCache"
+            / "Default"
+            / "Service Worker"
+            / "CacheStorage",
+            shared.home
+            / ".local"
+            / "state"
+            / "NVIDIA"
+            / "GeForceNOW"
+            / "CefCache"
+            / "Default"
+            / "Service Worker"
+            / "CacheStorage",
+        )
+        for candidate in candidates:
+            if candidate.is_dir():
+                return candidate
+        return None
+
+    def _load_catalog_cache(self) -> dict[str, dict[str, str]] | None:
+        path = self._cache_path
+        if not path.is_file():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+
+        updated_at = payload.get("updated_at")
+        if not isinstance(updated_at, (int, float)):
+            return None
+        if int(time()) - int(updated_at) > GFN_CACHE_TTL_SECONDS:
+            return None
+
+        steam_catalog = payload.get("steam_catalog")
+        if not isinstance(steam_catalog, dict):
+            return None
+
+        normalized: dict[str, dict[str, str]] = {}
+        for appid, entry in steam_catalog.items():
+            if not isinstance(appid, str) or not appid.isdigit():
+                continue
+            if not isinstance(entry, dict):
+                continue
+            cms_id = str(entry.get("cms_id", "")).strip()
+            title = str(entry.get("title", "")).strip()
+            gfn_id = str(entry.get("gfn_id", "")).strip()
+            if not (cms_id.isdigit() and title and gfn_id):
+                continue
+            normalized[appid] = {"cms_id": cms_id, "title": title, "gfn_id": gfn_id}
+        return normalized or None
+
+    def _save_catalog_cache(self, steam_catalog: dict[str, dict[str, str]]) -> None:
+        path = self._cache_path
+        payload = {
+            "updated_at": int(time()),
+            "steam_catalog": steam_catalog,
+        }
+        try:
+            path.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+        except OSError:
+            return
+
+    @staticmethod
+    def _query_catalog_page(after: str) -> tuple[list[dict], bool, str]:
+        query = (
+            f'{{ apps(country:"US", language:"en_US", after: "{after}") '
+            "{ pageInfo { hasNextPage endCursor } "
+            "items { id cmsId title type variants { id title appStore osType storeId } } "
+            "} }"
+        )
+        try:
+            response = requests.get(
+                GFN_APPS_ENDPOINT,
+                params={"requestType": "apps", "query": query},
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+        except RequestException:
+            response = requests.post(
+                GFN_APPS_FALLBACK_ENDPOINT,
+                data=query,
+                headers={"Content-Type": "application/json"},
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+        response.raise_for_status()
+        payload = response.json()
+        apps = payload.get("data", {}).get("apps", {})
+        items = apps.get("items") or []
+        if not isinstance(items, list):
+            items = []
+        page_info = apps.get("pageInfo") or {}
+        has_next_page = bool(page_info.get("hasNextPage"))
+        end_cursor = str(page_info.get("endCursor") or "")
+        return items, has_next_page, end_cursor
+
+    def _fetch_catalog(self) -> dict[str, dict[str, str]]:
+        after = ""
+        steam_catalog: dict[str, dict[str, str]] = {}
+        for _page in range(GFN_MAX_PAGES):
+            try:
+                items, has_next_page, end_cursor = self._query_catalog_page(after)
+            except (RequestException, ValueError, TypeError) as error:
+                logging.warning(
+                    "GeForce NOW: failed to fetch catalog page", exc_info=error
+                )
+                break
+
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+
+                item_type = str(item.get("type") or "").upper()
+                if item_type != "GAME":
+                    continue
+
+                title = str(item.get("title") or "").strip()
+                gfn_id = str(item.get("id") or "").strip()
+                cms_id = str(item.get("cmsId") or "").strip()
+                if not (title and gfn_id and cms_id.isdigit()):
+                    continue
+
+                variants = item.get("variants") or []
+                if not isinstance(variants, list):
+                    continue
+                for variant in variants:
+                    if not isinstance(variant, dict):
+                        continue
+
+                    app_store = str(variant.get("appStore") or "").upper()
+                    os_type = str(variant.get("osType") or "").upper()
+                    appid = str(variant.get("storeId") or "").strip()
+                    if app_store != "STEAM" or os_type != "WINDOWS" or not appid.isdigit():
+                        continue
+
+                    if appid not in steam_catalog:
+                        steam_catalog[appid] = {
+                            "cms_id": cms_id,
+                            "title": title,
+                            "gfn_id": gfn_id,
+                        }
+
+            if not has_next_page or not end_cursor:
+                break
+            after = end_cursor
+
+        return steam_catalog
+
+    def steam_catalog(self) -> dict[str, dict[str, str]]:
+        if self._steam_catalog_cache is not None:
+            return self._steam_catalog_cache
+
+        cached = self._load_catalog_cache()
+        if cached is not None:
+            self._steam_catalog_cache = cached
+            return self._steam_catalog_cache
+
+        fetched = self._fetch_catalog()
+        self._steam_catalog_cache = fetched
+        if fetched:
+            self._save_catalog_cache(fetched)
+        return self._steam_catalog_cache
+
+    def make_executable(
+        self,
+        *,
+        cms_id: str,
+        short_name: str = "game_gfn_pc",
+        parent_game_id: str = "",
+    ) -> str:
+        safe_cms_id = quote(str(cms_id).strip(), safe="")
+        safe_short_name = quote(str(short_name).strip(), safe="")
+        safe_parent_game_id = quote(str(parent_game_id).strip(), safe="")
+        route = (
+            f"#?cmsId={safe_cms_id}"
+            "&launchSource=External"
+            f"&shortName={safe_short_name or 'game_gfn_pc'}"
+            f"&parentGameId={safe_parent_game_id}"
+        )
+        return (
+            "flatpak run --command=/app/cef/GeForceNOW "
+            f"{self.flatpak_app_id} '--url-route={route}'"
+        )

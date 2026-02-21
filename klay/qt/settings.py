@@ -18,10 +18,13 @@ GENERAL_BOOL_KEYS = {
     "sgdb-animated": False,
     "igdb": False,
     "refresh-covers-on-metadata": False,
+    "geforcenow-include-in-all-games": False,
+    "geforcenow-close-on-stream-end": False,
 }
 
 SOURCE_BOOL_KEYS = {
     "steam": True,
+    "geforcenow": True,
     "lutris": True,
     "heroic": True,
     "bottles": True,

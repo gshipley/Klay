@@ -175,6 +175,7 @@ class GameEntry:
 class GameLibrary:
     SOURCE_LABELS = {
         "steam": "Steam",
+        "geforcenow": "GeForce NOW",
         "lutris": "Lutris",
         "heroic": "Heroic",
         "desktop": "Desktop Entries",
@@ -619,28 +620,32 @@ class GameLibrary:
             "/usr/bin/flatpak-spawn --host "
         )
 
-    def launch(self, game: GameEntry) -> None:
+    def launch(self, game: GameEntry) -> subprocess.Popen[Any]:
         executable = game.executable
+        process: subprocess.Popen[Any]
         if isinstance(executable, list):
             if self._is_flatpak_sandbox() and not self._list_uses_host_spawn(executable):
                 executable = ["flatpak-spawn", "--host", *executable]
-            subprocess.Popen(executable, start_new_session=True)  # noqa: S603
+            process = subprocess.Popen(executable, start_new_session=True)  # noqa: S603
         elif sys.platform.startswith("win"):
-            subprocess.Popen(
+            process = subprocess.Popen(
                 executable,
                 shell=True,
                 start_new_session=True,
                 creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
             )  # noqa: S602,S603
         elif self._is_flatpak_sandbox() and not self._string_uses_host_spawn(executable):
-            subprocess.Popen(  # noqa: S603
+            process = subprocess.Popen(  # noqa: S603
                 ["flatpak-spawn", "--host", "/bin/sh", "-lc", executable],
                 start_new_session=True,
             )
         else:
-            subprocess.Popen(executable, shell=True, start_new_session=True)  # noqa: S602,S603
+            process = subprocess.Popen(  # noqa: S602,S603
+                executable, shell=True, start_new_session=True
+            )
 
         self.mark_played(game)
+        return process
 
     def open_web_search(self, game: GameEntry, engine: str) -> bool:
         url = self.SEARCH_ENGINES.get(engine)

@@ -4,6 +4,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from html import escape
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -80,6 +81,28 @@ ROLE_PLAYTIME = Qt.ItemDataRole.UserRole + 7
 
 COVER_SIZE = QSize(200, 300)
 CATEGORY_FILTER_PREFIX = "category:"
+ALL_GAMES_EXCLUDED_SOURCES_DEFAULT = frozenset({"geforcenow"})
+GEFORCENOW_STATE_DIR = Path.home() / ".var/app/com.nvidia.geforcenow/.local/state/NVIDIA/GeForceNOW"
+GEFORCENOW_LOG_GLOBS = (
+    "console.log*",
+    "CxNative_GeForceNOW*.log",
+    "geronimo.log*",
+)
+GEFORCENOW_STREAM_END_MARKERS = (
+    "onstreamingterminated",
+    "stream ended",
+    "notifygameend",
+    "streamer_exit",
+    "streaming ended - resuming patch expiry checks",
+)
+GEFORCENOW_STREAM_START_MARKERS = (
+    "game_launch_event",
+    "onstreamingbegin",
+    "streaming started",
+    "advancing to state: streaming",
+    "streamer_start",
+    "streamerloading",
+)
 
 
 def _fmt_timestamp(timestamp: int) -> str:
@@ -147,6 +170,7 @@ def _source_icon(source: str) -> QIcon:
 
     source_icon_candidates = {
         "steam": ["steam_logo.png"],
+        "geforcenow": ["geforcenow_logo.png", "geforce-now-logo.png"],
         "lutris": ["lutris.svg"],
         "heroic": ["heroic.webp"],
         "flatpak": ["flatpak-logo.png"],
@@ -180,6 +204,7 @@ def _source_icon(source: str) -> QIcon:
         "all": "view-grid-symbolic",
         "imported": "list-add-symbolic",
         "steam": "steam-source-symbolic",
+        "geforcenow": "network-server-symbolic",
         "lutris": "lutris-source-symbolic",
         "heroic": "heroic-source-symbolic",
         "desktop": "user-desktop-symbolic",
@@ -788,6 +813,13 @@ class KlayMainWindow(QMainWindow):
         self.import_progress_dialog: WorkerProgressDialog | None = None
         self.last_import_session: ImportSession | None = None
         self._close_after_import_cancel = False
+        self._geforcenow_process: subprocess.Popen[Any] | None = None
+        self._geforcenow_monitor_timer: QTimer | None = None
+        self._geforcenow_log_offsets: dict[Path, int] = {}
+        self._geforcenow_log_files: list[Path] = []
+        self._geforcenow_idle_polls = 0
+        self._geforcenow_stream_started = False
+        self._geforcenow_monitor_started_at = 0.0
 
         self.setWindowTitle("Klay")
         icon = _app_icon()
@@ -1025,6 +1057,10 @@ class KlayMainWindow(QMainWindow):
         right.setSpacing(8)
         body_layout.addLayout(right, 1)
 
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(12)
+
         self.details_title = QLabel("Game Title")
         title_font = QFont(self.font())
         title_font.setPointSize(title_font.pointSize() + 9)
@@ -1032,7 +1068,19 @@ class KlayMainWindow(QMainWindow):
         self.details_title.setFont(title_font)
         self.details_title.setWordWrap(True)
         self.details_title.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        right.addWidget(self.details_title)
+        title_row.addWidget(self.details_title, 1)
+
+        self.details_source_logo = QLabel()
+        self.details_source_logo.setObjectName("DetailsSourceLogo")
+        self.details_source_logo.setFixedSize(48, 48)
+        self.details_source_logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.details_source_logo.setToolTip("Source")
+        title_row.addWidget(
+            self.details_source_logo,
+            0,
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight,
+        )
+        right.addLayout(title_row)
 
         self.details_developer = QLabel("")
         dev_font = QFont(self.font())
@@ -1258,6 +1306,11 @@ class KlayMainWindow(QMainWindow):
                 border: 1px solid rgba(255, 255, 255, 32);
                 background: rgba(14, 15, 18, 220);
             }
+            QLabel#DetailsSourceLogo {
+                border: none;
+                background: transparent;
+                padding: 0px;
+            }
             QFrame#DetailsBody QLabel {
                 color: #f2f3f5;
             }
@@ -1411,6 +1464,7 @@ class KlayMainWindow(QMainWindow):
             event.ignore()
             return
 
+        self._stop_geforcenow_autoclose_monitor()
         self._save_state()
         super().closeEvent(event)
 
@@ -1586,6 +1640,12 @@ class KlayMainWindow(QMainWindow):
         self.sidebar_list.clear()
 
         visible_games = [game for game in self.games if not game.hidden]
+        excluded_sources = self._all_games_excluded_sources()
+        all_games = [
+            game
+            for game in visible_games
+            if game.base_source not in excluded_sources
+        ]
         added_games = [game for game in visible_games if game.base_source == "imported"]
         source_counts: dict[str, int] = {}
         for game in visible_games:
@@ -1601,7 +1661,7 @@ class KlayMainWindow(QMainWindow):
                     continue
                 category_counts[key] = category_counts.get(key, 0) + 1
 
-        self._add_sidebar_item(label="All Games", count=len(visible_games), key="all")
+        self._add_sidebar_item(label="All Games", count=len(all_games), key="all")
         if added_games:
             self._add_sidebar_item(label="Added", count=len(added_games), key="imported")
         if source_counts:
@@ -1641,6 +1701,15 @@ class KlayMainWindow(QMainWindow):
             self.sidebar_list.setCurrentRow(row_to_select)
         self.sidebar_list.blockSignals(False)
         self._update_page_title()
+
+    def _all_games_excluded_sources(self) -> set[str]:
+        include_geforcenow = self.runtime_settings.get_bool(
+            "geforcenow-include-in-all-games",
+            GENERAL_BOOL_KEYS["geforcenow-include-in-all-games"],
+        )
+        if include_geforcenow:
+            return set()
+        return set(ALL_GAMES_EXCLUDED_SOURCES_DEFAULT)
 
     def selected_game_id(self) -> str | None:
         item = self.games_list.currentItem()
@@ -1926,7 +1995,14 @@ class KlayMainWindow(QMainWindow):
             games = [game for game in self.games if game.hidden]
         else:
             games = [game for game in self.games if not game.hidden]
-            if self.current_filter == "imported":
+            if self.current_filter == "all":
+                excluded_sources = self._all_games_excluded_sources()
+                games = [
+                    game
+                    for game in games
+                    if game.base_source not in excluded_sources
+                ]
+            elif self.current_filter == "imported":
                 games = [game for game in games if game.base_source == "imported"]
             elif (category_key := _category_from_filter_key(self.current_filter)) is not None:
                 games = [
@@ -2492,12 +2568,219 @@ class KlayMainWindow(QMainWindow):
             self.open_game_details(refreshed)
         self.statusBar().showMessage("Metadata refreshed from IGDB")
 
+    def _geforcenow_autoclose_enabled(self) -> bool:
+        return self.runtime_settings.get_bool(
+            "geforcenow-close-on-stream-end",
+            GENERAL_BOOL_KEYS["geforcenow-close-on-stream-end"],
+        )
+
+    @staticmethod
+    def _geforcenow_flatpak_command(*args: str) -> list[str]:
+        command = ["flatpak", *args]
+        if os.getenv("FLATPAK_ID"):
+            return ["flatpak-spawn", "--host", *command]
+        return command
+
+    def _is_geforcenow_running(self) -> bool:
+        checks = (("ps", "--columns=application"), ("ps",))
+        for args in checks:
+            try:
+                result = subprocess.run(  # noqa: S603
+                    self._geforcenow_flatpak_command(*args),
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                )
+            except Exception:  # pylint: disable=broad-exception-caught
+                continue
+            if result.returncode != 0:
+                continue
+            if "com.nvidia.geforcenow" in result.stdout:
+                return True
+            if args == ("ps", "--columns=application"):
+                # Flatpak responded and app id was absent.
+                return False
+        return False
+
+    def _refresh_geforcenow_log_files(self, *, initialize_new_offsets: bool) -> None:
+        discovered: list[Path] = []
+        if GEFORCENOW_STATE_DIR.is_dir():
+            for pattern in GEFORCENOW_LOG_GLOBS:
+                discovered.extend(sorted(GEFORCENOW_STATE_DIR.glob(pattern)))
+        if not discovered:
+            discovered = [
+                GEFORCENOW_STATE_DIR / "console.log",
+                GEFORCENOW_STATE_DIR / "CxNative_GeForceNOW.log",
+            ]
+
+        ordered_unique: list[Path] = []
+        seen: set[Path] = set()
+        for path in discovered:
+            if path in seen:
+                continue
+            seen.add(path)
+            ordered_unique.append(path)
+            if path in self._geforcenow_log_offsets:
+                continue
+            if initialize_new_offsets:
+                try:
+                    self._geforcenow_log_offsets[path] = path.stat().st_size
+                except OSError:
+                    self._geforcenow_log_offsets[path] = 0
+            else:
+                # Start from EOF for newly discovered files to avoid stale markers
+                # from old rotated logs closing a fresh launch.
+                try:
+                    self._geforcenow_log_offsets[path] = path.stat().st_size
+                except OSError:
+                    self._geforcenow_log_offsets[path] = 0
+
+        self._geforcenow_log_files = ordered_unique
+
+    def _start_geforcenow_autoclose_monitor(self, process: subprocess.Popen[Any]) -> None:
+        self._stop_geforcenow_autoclose_monitor()
+        self._geforcenow_process = process
+        self._geforcenow_log_offsets = {}
+        self._geforcenow_idle_polls = 0
+        self._geforcenow_stream_started = False
+        self._geforcenow_monitor_started_at = time.monotonic()
+        self._refresh_geforcenow_log_files(initialize_new_offsets=True)
+
+        self._geforcenow_monitor_timer = QTimer(self)
+        self._geforcenow_monitor_timer.setInterval(1200)
+        self._geforcenow_monitor_timer.timeout.connect(self._poll_geforcenow_stream_end)
+        self._geforcenow_monitor_timer.start()
+
+    def _stop_geforcenow_autoclose_monitor(self) -> None:
+        if self._geforcenow_monitor_timer is not None:
+            self._geforcenow_monitor_timer.stop()
+            self._geforcenow_monitor_timer.deleteLater()
+            self._geforcenow_monitor_timer = None
+        self._geforcenow_process = None
+        self._geforcenow_log_offsets.clear()
+        self._geforcenow_log_files = []
+        self._geforcenow_idle_polls = 0
+        self._geforcenow_stream_started = False
+        self._geforcenow_monitor_started_at = 0.0
+
+    def _force_kill_geforcenow_process(self, process: subprocess.Popen[Any]) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            if os.name == "nt":
+                process.kill()
+            else:
+                os.killpg(process.pid, signal.SIGKILL)
+        except Exception:  # pylint: disable=broad-exception-caught
+            try:
+                process.kill()
+            except Exception:  # pylint: disable=broad-exception-caught
+                return
+
+    def _kill_geforcenow_flatpak(self) -> bool:
+        try:
+            result = subprocess.run(  # noqa: S603
+                self._geforcenow_flatpak_command("kill", "com.nvidia.geforcenow"),
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=4,
+            )
+            return result.returncode == 0
+        except Exception:  # pylint: disable=broad-exception-caught
+            return False
+
+    def _terminate_geforcenow_session(self) -> None:
+        process = self._geforcenow_process
+        closed = self._kill_geforcenow_flatpak()
+
+        if not closed and process is not None and process.poll() is None:
+            try:
+                if os.name == "nt":
+                    process.terminate()
+                else:
+                    os.killpg(process.pid, signal.SIGTERM)
+                QTimer.singleShot(
+                    2500, lambda proc=process: self._force_kill_geforcenow_process(proc)
+                )
+                closed = True
+            except Exception:  # pylint: disable=broad-exception-caught
+                closed = False
+
+        if closed:
+            self.statusBar().showMessage("GeForce NOW stream ended. Closed GeForce NOW")
+        else:
+            self.statusBar().showMessage("GeForce NOW stream ended")
+        self._stop_geforcenow_autoclose_monitor()
+
+    def _scan_geforcenow_logs_for_stream_end(self) -> bool:
+        for path in self._geforcenow_log_files:
+            try:
+                current_size = path.stat().st_size
+            except OSError:
+                continue
+
+            previous_size = self._geforcenow_log_offsets.get(path, 0)
+            if current_size < previous_size:
+                previous_size = 0
+            if current_size == previous_size:
+                continue
+
+            try:
+                with path.open("r", encoding="utf-8", errors="ignore") as open_file:
+                    open_file.seek(previous_size)
+                    chunk = open_file.read()
+            except OSError:
+                self._geforcenow_log_offsets[path] = current_size
+                continue
+
+            self._geforcenow_log_offsets[path] = current_size
+            if not chunk:
+                continue
+            lower_chunk = chunk.casefold()
+            for line in lower_chunk.splitlines():
+                if any(marker in line for marker in GEFORCENOW_STREAM_START_MARKERS):
+                    self._geforcenow_stream_started = True
+                stream_end_armed = self._geforcenow_stream_started or (
+                    self._geforcenow_monitor_started_at > 0
+                    and (time.monotonic() - self._geforcenow_monitor_started_at) >= 25
+                )
+                if stream_end_armed and any(
+                    marker in line for marker in GEFORCENOW_STREAM_END_MARKERS
+                ):
+                    return True
+        return False
+
+    def _poll_geforcenow_stream_end(self) -> None:
+        if not self._geforcenow_autoclose_enabled():
+            self._stop_geforcenow_autoclose_monitor()
+            return
+
+        self._refresh_geforcenow_log_files(initialize_new_offsets=False)
+        if self._scan_geforcenow_logs_for_stream_end():
+            self._terminate_geforcenow_session()
+            return
+
+        process = self._geforcenow_process
+        process_alive = process is not None and process.poll() is None
+        if process_alive or self._is_geforcenow_running():
+            self._geforcenow_idle_polls = 0
+            return
+
+        self._geforcenow_idle_polls += 1
+        if self._geforcenow_idle_polls >= 10:
+            self._stop_geforcenow_autoclose_monitor()
+
     def launch_game(self, game: GameEntry) -> None:
         try:
-            self.library.launch(game)
+            process = self.library.launch(game)
         except OSError as error:
             self._show_error("Launch Failed", str(error))
             return
+
+        if game.base_source == "geforcenow" and self._geforcenow_autoclose_enabled():
+            self._start_geforcenow_autoclose_monitor(process)
         self.statusBar().showMessage(f"Launched {game.name}")
         if self.runtime_settings.get_bool(
             "exit-after-launch", GENERAL_BOOL_KEYS["exit-after-launch"]
@@ -3056,7 +3339,8 @@ class KlayMainWindow(QMainWindow):
             self.import_progress_dialog.cancel_requested.connect(self._cancel_import)
             self.import_progress_dialog.show()
 
-        fast_mode = bool(auto and mode == "import")
+        # Always run full enrichment so first imports include metadata and covers.
+        fast_mode = False
         self.import_thread = ImportWorkerThread(
             self.library.data_dir_name,
             mode=mode,
@@ -3118,10 +3402,15 @@ class KlayMainWindow(QMainWindow):
             "category-icons",
             json.dumps(self.category_icon_paths, sort_keys=True),
         )
+        if not self._geforcenow_autoclose_enabled():
+            self._stop_geforcenow_autoclose_monitor()
         self._apply_color_mode()
         self.reload_games()
         if dialog.refresh_requested:
             self.refresh_metadata_from_sgdb()
+            return
+        if dialog.import_requested:
+            self.import_games(auto=False)
             return
         self.statusBar().showMessage("Preferences updated")
 
@@ -3233,6 +3522,11 @@ class KlayMainWindow(QMainWindow):
 
         self.details_header_title.setText(game.name)
         self.details_title.setText(game.name)
+        source_icon = _source_icon(game.base_source)
+        source_pixmap = source_icon.pixmap(QSize(36, 36))
+        self.details_source_logo.setPixmap(source_pixmap)
+        self.details_source_logo.setVisible(not source_pixmap.isNull())
+        self.details_source_logo.setToolTip(self.library.source_label(game.base_source))
         self.details_developer.setText(game.developer or "")
         self.details_developer.setVisible(bool(game.developer))
         self.details_publisher.setText(

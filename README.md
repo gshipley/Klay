@@ -95,6 +95,24 @@ Optional:
 - Use `Import` from the main UI.
 - Enable/disable sources in `Preferences -> Sources`.
 - Configure source paths if your launchers are in non-default locations.
+- You can also trigger an on-demand import from `Preferences -> Import -> Import Games Now`.
+- GeForce NOW source support:
+  - Requires NVIDIA GeForce NOW Flatpak (`com.nvidia.geforcenow`) installed.
+  - Imports GeForce NOW-compatible Steam titles by matching Steam app IDs against
+    the GeForce NOW catalog.
+  - Uses local GeForce NOW cache (`.../CefCache/Default/Service Worker/CacheStorage`)
+    to detect linked Steam library entries and launch-route metadata when available.
+  - Installed Steam titles are always considered.
+  - Steam games you own but do not have installed are read from local Steam client
+    data (`userdata/*/config/localconfig.vdf`) when available.
+  - Public Steam profile lookup is used only as a fallback when local ownership
+    data is unavailable.
+  - By default, GeForce NOW entries appear under the `GeForce NOW` source filter
+    and are not included in `All Games`.
+  - `Preferences -> GeForce NOW` includes:
+    - `Include GeForce NOW games in All Games`
+    - `Close GeForce NOW after stream ends (best effort)`
+      (uses runtime/log signals and may vary by GeForce NOW client updates)
 
 ### 2. Browse and filter
 
@@ -171,6 +189,11 @@ General settings include:
 - High-quality image preference
 - Remove missing imported games
 
+GeForce NOW settings include:
+
+- Include GeForce NOW games in `All Games`
+- Optional auto-close of GeForce NOW when a stream ends (best effort)
+
 ## Data Paths
 
 Klay uses its own namespace:
@@ -198,6 +221,20 @@ Klay uses its own namespace:
 - Confirm source is enabled in Preferences.
 - Verify source path values.
 - Re-run import and check status output in the import dialog.
+
+### GeForce NOW game missing
+
+- Confirm `GeForce NOW` source is enabled in `Preferences -> Sources`.
+- Confirm `com.nvidia.geforcenow` Flatpak is installed.
+- Launch GeForce NOW once and open `Library` so local cache data is populated.
+- Ensure Steam has logged in at least once on this machine so local ownership data
+  exists under `userdata/*/config/localconfig.vdf`.
+- If local ownership data is missing, Klay falls back to Steam profile lookup.
+
+### GeForce NOW window auto-close
+
+- Enable in `Preferences -> GeForce NOW -> Close GeForce NOW after stream ends`.
+- This is a best-effort behavior based on GeForce NOW runtime/log signals.
 
 ## Project Notes
 
