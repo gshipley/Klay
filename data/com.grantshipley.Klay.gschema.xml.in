@@ -95,6 +95,12 @@
     <key name="flatpak-user-location" type="s">
       <default>"~/.local/share/flatpak/"</default>
     </key>
+    <key name="geforcenow-include-in-all-games" type="b">
+      <default>false</default>
+    </key>
+    <key name="geforcenow-close-on-stream-end" type="b">
+      <default>false</default>
+    </key>
     <key name="flatpak-import-launchers" type="b">
       <default>false</default>
     </key>

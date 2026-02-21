@@ -39,6 +39,7 @@ from klay.qt.settings import (
 
 SOURCE_LAYOUT = (
     ("steam", "Steam", (("steam-location", "Data Directory"),)),
+    ("geforcenow", "GeForce NOW", ()),
     (
         "lutris",
         "Lutris",
@@ -122,6 +123,7 @@ class PreferencesDialog(QDialog):
         self.category_clear_icon_button: QPushButton | None = None
         self.category_bundled_icons = self._bundled_category_icon_paths()
         self.refresh_requested = False
+        self.import_requested = False
 
         self.setWindowTitle("Preferences")
         self.setModal(True)
@@ -134,6 +136,7 @@ class PreferencesDialog(QDialog):
 
         tabs.addTab(self._build_general_page(), "General")
         tabs.addTab(self._build_sources_page(), "Sources")
+        tabs.addTab(self._build_geforcenow_page(), "GeForce NOW")
         tabs.addTab(self._build_import_page(), "Import")
         tabs.addTab(self._build_categories_page(), "Categories")
         tabs.addTab(self._build_sgdb_page(), "SteamGridDB")
@@ -366,6 +369,48 @@ class PreferencesDialog(QDialog):
                 default=IMPORT_BOOL_KEYS["flatpak-import-launchers"],
             )
         )
+        import_now_button = QPushButton("Import Games Now")
+        import_now_button.clicked.connect(self._request_import)
+        layout.addWidget(import_now_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        layout.addStretch(1)
+        return page
+
+    def _build_geforcenow_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        info = QLabel(
+            "Configure GeForce NOW-specific library behavior.\n"
+            "Source enablement remains in the Sources tab."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        layout.addWidget(
+            self._checkbox(
+                "geforcenow-include-in-all-games",
+                "Include GeForce NOW games in All Games",
+                default=GENERAL_BOOL_KEYS["geforcenow-include-in-all-games"],
+                tooltip=(
+                    "When disabled, GeForce NOW games appear only in the GeForce NOW"
+                    " source filter."
+                ),
+            )
+        )
+        layout.addWidget(
+            self._checkbox(
+                "geforcenow-close-on-stream-end",
+                "Close GeForce NOW after stream ends (best effort)",
+                default=GENERAL_BOOL_KEYS["geforcenow-close-on-stream-end"],
+                tooltip=(
+                    "Monitors GeForce NOW logs for stream-end events and closes the"
+                    " launched GeForce NOW process automatically."
+                ),
+            )
+        )
+
         layout.addStretch(1)
         return page
 
@@ -964,6 +1009,10 @@ class PreferencesDialog(QDialog):
         ):
             self.igdb_enabled_box.setChecked(True)
         self.refresh_requested = True
+        self.accept()
+
+    def _request_import(self) -> None:
+        self.import_requested = True
         self.accept()
 
     def _update_igdb_state(self) -> None:

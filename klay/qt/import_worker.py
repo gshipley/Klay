@@ -131,6 +131,7 @@ def _load_source_classes(errors: list[str]) -> list[type]:
             ("lutris_source", "LutrisSource"),
             ("heroic_source", "HeroicSource"),
             ("bottles_source", "BottlesSource"),
+            ("geforcenow_source", "GeForceNowSource"),
             ("flatpak_source", "FlatpakSource"),
             ("desktop_source", "DesktopSource"),
             ("itch_source", "ItchSource"),
@@ -420,6 +421,26 @@ def _apply_playtime_minutes(target: dict[str, Any], playtime_value: Any) -> bool
         return False
     target["playtime_minutes"] = minutes
     return True
+
+
+def _sync_existing_from_scan(
+    existing: dict[str, Any], scanned: dict[str, Any]
+) -> bool:
+    """
+    Refresh launch-critical fields for already imported entries.
+
+    This keeps user-managed state (hidden/categories/etc.) intact while allowing
+    source backends to update executable routes and renamed entries.
+    """
+    changed = False
+    for key in ("name", "source", "executable"):
+        value = scanned.get(key)
+        if value in (None, ""):
+            continue
+        if existing.get(key) != value:
+            existing[key] = value
+            changed = True
+    return changed
 
 
 def _normalize_metadata_fields(data: dict[str, Any]) -> None:
@@ -1451,7 +1472,7 @@ def _run_import() -> dict[str, Any]:
             existing = existing_games.get(game_id)
             if existing and not existing.get("removed", False):
                 summary.duplicates += 1
-                metadata_updated = False
+                metadata_updated = _sync_existing_from_scan(existing, game_data)
 
                 if steam_api_helper and _needs_online_metadata(existing):
                     online_data = _resolve_steam_online_data(
