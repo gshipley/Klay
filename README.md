@@ -8,6 +8,7 @@ Klay is a standalone Qt/KDE-focused game launcher that unifies games from multip
 - Qt desktop app (`PySide6`) tuned for KDE workflows
 - Imports from:
   - Steam
+  - GeForce NOW
   - Lutris
   - Heroic
   - Bottles
