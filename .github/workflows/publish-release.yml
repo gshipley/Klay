@@ -52,41 +52,53 @@ jobs:
               | head -n 1
           )"
           if [ -n "${previous_tag}" ]; then
-            changes="$(
-              git log --pretty='- %s' "${previous_tag}..${tag}" \
-                | sed '/^-[[:space:]]*$/d' \
-                | head -n 25
-            )"
+            git log --pretty='- %s' "${previous_tag}..${tag}" \
+              | sed '/^-[[:space:]]*$/d' \
+              | head -n 25 \
+              > release_changes
           else
-            changes="$(
-              git log --pretty='- %s' "${tag}" \
-                | sed '/^-[[:space:]]*$/d' \
-                | head -n 25
-            )"
+            git log --pretty='- %s' "${tag}" \
+              | sed '/^-[[:space:]]*$/d' \
+              | head -n 25 \
+              > release_changes
           fi
-          if [ -z "${changes}" ]; then
-            changes="- Maintenance update"
+          if [ ! -s release_changes ]; then
+            printf '%s\n' "- Maintenance update" > release_changes
           fi
 
-          {
-            echo "Klay ${tag}"
-            echo
-            if [ -n "${previous_tag}" ]; then
-              echo "## Changes Since ${previous_tag}"
-            else
-              echo "## Highlights"
-            fi
-            printf '%s\n' "${changes}"
-            echo
-            echo "## Download"
-            echo "- \`com.grantshipley.Klay.Devel.flatpak\`"
-            echo
-            echo "## Install"
-            echo '```bash'
-            echo "flatpak install --user --reinstall ./com.grantshipley.Klay.Devel.flatpak"
-            echo "flatpak run com.grantshipley.Klay.Devel"
-            echo '```'
-          } > release_notes
+          cp .github/RELEASE_NOTES_TEMPLATE.md release_notes
+          sed -i "1s|^# Klay vX.Y.Z$|# Klay ${tag}|" release_notes
+
+          awk '
+            BEGIN {
+              while ((getline line < "release_changes") > 0) {
+                changes = changes line "\n"
+              }
+            }
+            {
+              if ($0 == "## Changed") {
+                print
+                printf "%s", changes
+                print ""
+                in_changed = 1
+                next
+              }
+              if (in_changed && /^## /) {
+                in_changed = 0
+              }
+              if (in_changed) {
+                next
+              }
+              print
+            }
+          ' release_notes > release_notes.tmp
+          mv release_notes.tmp release_notes
+
+          if [ -n "${previous_tag}" ]; then
+            printf '\n> Auto-summary source: %s..%s\n' "${previous_tag}" "${tag}" >> release_notes
+          else
+            printf '\n> Auto-summary source: %s\n' "${tag}" >> release_notes
+          fi
 
       - name: Publish release
         uses: softprops/action-gh-release@v2.2.2
