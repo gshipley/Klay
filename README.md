@@ -4,7 +4,7 @@ I built Klay because I love Linux and I am also a huge gaming nerd. I recently s
 
 Some were in Steam. Some were cloud-only in GeForce NOW (thank you anti-cheat), and some were from Heroic, Lutris, Bottles, itch, or random desktop launchers. I wanted one launcher that felt native on KDE and gave me one clean library to manage. I was tired of the different ways to launch games. I used Cartridges for a long time, but I felt the time was right to go in a different direction. Something that suited me, and something I am proud to share in case it helps others as well. 
 
-This repo is **not 100% human coded** - Raise the RED FLAGS and SOUND THE ALARMS, if you care. Of course I am going to use AI to help me code! My day job is Sr. Director of Generative AI at Red Hat, after all. If you do care, please open an issue so we can discuss this - human to human. If you don't - This application will work (carefully guided by my own hands, someone who loves linux and loves gaming - I am currently playing Cronos, about time?). 
+This repo is **not 100% human coded** - Raise the RED FLAGS and SOUND THE ALARMS, if you care. Of course I am going to use AI to help me code! My day job is Sr. Director of Generative AI at Red Hat, after all. If you do care, please open an issue so we can discuss this - human to human. If you don't - This application will work as you expect. I use it everyday myself.
 
 I use this application/code daily because it solves a real need / want for me. I will continue to evolve it based upon feedback and things that I would use daily as a bazzite gamer! 
 
