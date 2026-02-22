@@ -1,9 +1,32 @@
-# Klay - Play games on KDE
-Klay is a standalone Qt/KDE-focused game launcher that unifies games from multiple sources with rich cover art and metadata.
+# Klay
 
-**Inspired by and based on the great [Cartridges](https://github.com/kra-mo/cartridges) app for GNOME.**
+I built Klay because I love Linux, I recently switched to Bazzite, and my game library was scattered across too many places.
 
-## Highlights
+Some were in Steam. Some were cloud-only in GeForce NOW. Some were from Heroic, Lutris, Bottles, itch, or random desktop launchers. I wanted one launcher that felt native on KDE and gave me one clean library to manage.
+
+Klay is that project.
+
+It is heavily inspired by [Cartridges](https://github.com/kra-mo/cartridges) for GNOME, but built around a Qt/KDE workflow.
+
+## Why I Built Klay
+
+- I wanted one place for all my games on Linux.
+- I wanted it to feel right on KDE, not like a GTK app bolted on.
+- I wanted better control over covers, metadata, categories, and launch behavior.
+- I wanted GeForce NOW support that works with how Linux users actually run it (Flatpak + cache data).
+
+## Who Klay Is For
+
+Klay is for you if:
+
+- You game on Linux (especially KDE/Bazzite) and use more than one launcher.
+- You are tired of hunting through Steam, Heroic, Lutris, and desktop entries just to find what to play.
+- You care about organizing your library (covers, categories, metadata) instead of just launching binaries.
+- You want a local-first launcher that still supports online metadata when you opt in.
+
+Klay is probably not for you if you only use a single launcher and never want to customize your library.
+
+## What It Does
 
 - Qt desktop app (`PySide6`) tuned for KDE workflows
 - Imports from:
@@ -18,10 +41,10 @@ Klay is a standalone Qt/KDE-focused game launcher that unifies games from multip
   - Flatpak
   - Desktop Entries
 - Main library cover grid with animated cover support (`.gif`, animated `.webp`)
-- Game details page with backdrop, metadata, and quick actions
-- SteamGridDB + IGDB integration for covers and metadata (Users have to provide their own API keys)
-- Playtime display on game cards when available from importer sources
-- Category management: create/rename/delete categories, assign games, customize category icons, and filter from the left nav
+- Game details page with metadata and quick actions
+- SteamGridDB + IGDB integration for covers and metadata (you provide your own API keys)
+- Playtime on game cards when source data is available
+- Category management (create, rename, delete, assign, custom icons)
 - Optional splash screen + startup sound
 
 ## Screenshots
@@ -49,14 +72,14 @@ flatpak install --user --reinstall ./com.grantshipley.Klay.Devel.flatpak
 flatpak run com.grantshipley.Klay.Devel
 ```
 
-## Build
+## Build From Source
 
 ```bash
 meson setup _build
 meson compile -C _build
 ```
 
-## Run
+Run:
 
 ```bash
 ./_build/klay/klay
@@ -89,43 +112,48 @@ Optional:
 - `klay --search "term"`: open with a pre-filled search term
 - `klay --launch GAME_ID`: launch a game directly by id
 
-## Usage Guide
+## Using Klay
 
-### 1. Import games
+### Import games
 
 - Use `Import` from the main UI.
 - Enable/disable sources in `Preferences -> Sources`.
 - Configure source paths if your launchers are in non-default locations.
-- You can also trigger an on-demand import from `Preferences -> Import -> Import Games Now`.
-- GeForce NOW source support:
-  - Requires NVIDIA GeForce NOW Flatpak (`com.nvidia.geforcenow`) installed.
-  - Imports GeForce NOW-compatible Steam titles by matching Steam app IDs against
-    the GeForce NOW catalog.
-  - Uses local GeForce NOW cache (`.../CefCache/Default/Service Worker/CacheStorage`)
-    to detect linked Steam library entries and launch-route metadata when available.
-  - Installed Steam titles are always considered.
-  - Steam games you own but do not have installed are read from local Steam client
-    data (`userdata/*/config/localconfig.vdf`) when available.
-  - Public Steam profile lookup is used only as a fallback when local ownership
-    data is unavailable.
-  - By default, GeForce NOW entries appear under the `GeForce NOW` source filter
-    and are not included in `All Games`.
-  - `Preferences -> GeForce NOW` includes:
-    - `Include GeForce NOW games in All Games`
-    - `Close GeForce NOW after stream ends (best effort)`
-      (uses runtime/log signals and may vary by GeForce NOW client updates)
+- You can trigger an on-demand import from `Preferences -> Import -> Import Games Now`.
 
-### 2. Browse and filter
+GeForce NOW notes:
+
+- Requires NVIDIA GeForce NOW Flatpak (`com.nvidia.geforcenow`) installed.
+- Imports linked GeForce NOW library entries from local GeForce NOW cache:
+  - `.../CefCache/Default/Service Worker/CacheStorage`
+- Supports entries across linked stores when present in your GFN library:
+  - Steam
+  - Xbox / Game Pass
+  - Epic
+  - Ubisoft Connect
+  - EA App
+- Uses the GeForce NOW catalog API to resolve launch-route metadata (`cmsId`, variant routing, parent game id).
+- Installed Steam titles are still considered.
+- Steam games you own but do not have installed are read from local Steam data (`userdata/*/config/localconfig.vdf`) when available.
+- Public Steam profile lookup is only a fallback when local Steam ownership data is unavailable and GFN library cache data is unavailable.
+- By default, GeForce NOW entries appear under the `GeForce NOW` source filter and are not included in `All Games`.
+
+`Preferences -> GeForce NOW` includes:
+
+- `Include GeForce NOW games in All Games`
+- `Close GeForce NOW after stream ends (best effort)`
+
+### Browse and filter
 
 - Left nav shows:
   - `All Games`
   - `Added`
-  - imported source groups
-  - custom categories (if any)
+  - source groups
+  - custom categories (if assigned)
 - Search filters by title, metadata fields, and categories.
-- Sort by A-Z, Z-A, newest, oldest, and last played.
+- Sort modes include A-Z, Z-A, newest, oldest, and last played.
 
-### 3. Game details
+### Game details
 
 From details view you can:
 
@@ -138,16 +166,16 @@ From details view you can:
 - Change cover
 - Manage categories
 
-Clicking outside the details card returns to the main library.
+Click outside the details card to return to the main library.
 
-### 4. Covers and animation
+### Covers and animation
 
-- Klay supports static and animated covers.
-- Cover picker shows available candidates in card form and marks animated options.
+- Supports static and animated covers.
+- Cover picker shows candidates in card form and marks animated options.
 - Animated covers are prioritized when enabled.
 - Custom chosen covers are preserved and not overwritten by startup auto-import.
 
-### 5. Metadata providers
+### Metadata providers
 
 `Preferences -> SteamGridDB`:
 
@@ -155,28 +183,29 @@ Clicking outside the details card returns to the main library.
 - Enable cover lookup
 - Prefer SGDB covers
 - Allow animated SGDB covers
-- Optional: include image updates during metadata refresh
+- Optionally include image updates during metadata refresh
 
 `Preferences -> IGDB`:
 
 - Provide `Client ID` and either:
-  - `Access Token`, or
-  - `Client Secret` (Klay will fetch token automatically)
+  - `Access Token`
+  - `Client Secret` (Klay can fetch token automatically)
 - Enable IGDB metadata enrichment
 - Refresh metadata on demand
 
 ## Categories
 
 - Assign categories per game from details view (`Categories`) or right-click menu (`Categories...`).
-- Manage category definitions in `Preferences -> Categories`:
-  - Add categories
-  - Rename categories
-  - Delete categories (with confirmation)
+- Manage definitions in `Preferences -> Categories`:
+  - Add
+  - Rename
+  - Delete (with confirmation)
 - Customize category icons in `Preferences -> Categories`:
   - Pick from built-in icon set
   - Upload your own icon
-  - Clear a custom icon and fall back to default
-- Category filters appear in the left nav only when games are assigned to that category.
+  - Clear custom icon and fall back to default
+
+Category filters show up in the left nav only when games are assigned to that category.
 
 ## Preferences
 
@@ -223,19 +252,19 @@ Klay uses its own namespace:
 - Verify source path values.
 - Re-run import and check status output in the import dialog.
 
-### GeForce NOW game missing
+### GeForce NOW game is missing
 
 - Confirm `GeForce NOW` source is enabled in `Preferences -> Sources`.
 - Confirm `com.nvidia.geforcenow` Flatpak is installed.
 - Launch GeForce NOW once and open `Library` so local cache data is populated.
-- Ensure Steam has logged in at least once on this machine so local ownership data
-  exists under `userdata/*/config/localconfig.vdf`.
+- For non-Steam titles, make sure the platform account is connected in GeForce NOW and the game appears in your GFN `Library`.
+- Ensure Steam has logged in at least once on this machine so local ownership data exists under `userdata/*/config/localconfig.vdf`.
 - If local ownership data is missing, Klay falls back to Steam profile lookup.
 
-### GeForce NOW window auto-close
+### GeForce NOW auto-close not working
 
 - Enable in `Preferences -> GeForce NOW -> Close GeForce NOW after stream ends`.
-- This is a best-effort behavior based on GeForce NOW runtime/log signals.
+- This is best-effort behavior based on runtime/log signals and can vary between GFN client versions.
 
 ## Project Notes
 

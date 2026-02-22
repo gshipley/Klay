@@ -43,6 +43,13 @@ GFN_MAX_PAGES = 20
 GFN_CACHE_TTL_SECONDS = 6 * 60 * 60
 REQUEST_TIMEOUT_SECONDS = 12
 GFN_LIBRARY_OWNED_STATUSES = {"MANUAL", "PLATFORM_SYNC", "OWNED", "STEAM_SYNC"}
+GFN_DEFAULT_SHORT_NAME = "game_gfn_pc"
+
+
+def _sanitize_game_token(value: str) -> str:
+    sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
+    sanitized = sanitized.strip("._-")
+    return sanitized or "gfn"
 
 
 class GeForceNowSourceIterable(SourceIterable):
@@ -270,22 +277,98 @@ class GeForceNowSourceIterable(SourceIterable):
             return None
         return payload if isinstance(payload, dict) else None
 
+    @staticmethod
+    def _best_online_cover_url(images: Any) -> str | None:
+        if not isinstance(images, dict):
+            return None
+
+        for key in ("HERO_IMAGE", "TV_BANNER", "BOX_ART"):
+            candidate = images.get(key)
+            if isinstance(candidate, str):
+                url = candidate.strip()
+                if url.startswith(("https://", "http://")):
+                    return url
+
+        for candidate in images.values():
+            if isinstance(candidate, str):
+                url = candidate.strip()
+                if url.startswith(("https://", "http://")):
+                    return url
+        return None
+
+    @staticmethod
+    def _catalog_variant_for_library_variant(
+        catalog_entry: dict[str, Any],
+        *,
+        app_store: str,
+        variant_id: str,
+    ) -> dict[str, str] | None:
+        variants = catalog_entry.get("variants")
+        if not isinstance(variants, list):
+            return None
+
+        fallback_match: dict[str, str] | None = None
+        for variant in variants:
+            if not isinstance(variant, dict):
+                continue
+
+            candidate_store = str(variant.get("app_store") or "").upper()
+            if candidate_store != app_store:
+                continue
+
+            if fallback_match is None:
+                fallback_match = {
+                    "variant_id": str(variant.get("variant_id") or "").strip(),
+                    "store_id": str(variant.get("store_id") or "").strip(),
+                    "short_name": str(variant.get("short_name") or "").strip(),
+                }
+
+            candidate_variant_id = str(variant.get("variant_id") or "").strip()
+            if variant_id and candidate_variant_id == variant_id:
+                return {
+                    "variant_id": candidate_variant_id,
+                    "store_id": str(variant.get("store_id") or "").strip(),
+                    "short_name": str(variant.get("short_name") or "").strip(),
+                }
+
+        return fallback_match
+
+    @staticmethod
+    def _library_variant_priority(*, selected: bool, status: str) -> int:
+        if selected:
+            return 2
+        if status in GFN_LIBRARY_OWNED_STATUSES:
+            return 1
+        return 0
+
+    @staticmethod
+    def _library_game_token(
+        *,
+        app_store: str,
+        store_id: str,
+        variant_id: str,
+        parent_game_id: str,
+    ) -> str:
+        if app_store == "STEAM" and store_id.isdigit():
+            return store_id
+
+        store_slug = re.sub(r"[^a-z0-9]+", "_", app_store.lower()).strip("_") or "store"
+        stable_key = store_id.strip() or variant_id.strip() or parent_game_id.strip()
+        return _sanitize_game_token(f"{store_slug}_{stable_key}")
+
+    @staticmethod
+    def _steam_cover_url(appid: str) -> str:
+        return f"https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/library_600x900.jpg"
+
     def _cached_gfn_library_games(
         self,
-        steam_catalog: dict[str, dict[str, str]],
-    ) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+        catalog: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
         cache_storage_root = self.source.gfn_cache_storage_path()
         if cache_storage_root is None or not cache_storage_root.is_dir():
-            return {}, {}
+            return {}
 
-        by_gfn_id: dict[str, tuple[str, dict[str, str]]] = {}
-        for appid, entry in steam_catalog.items():
-            gfn_id = str(entry.get("gfn_id") or "").strip()
-            if gfn_id:
-                by_gfn_id[gfn_id] = (appid, entry)
-
-        owned_games: dict[str, str] = {}
-        route_overrides: dict[str, dict[str, str]] = {}
+        owned_games: dict[str, dict[str, Any]] = {}
 
         for cache_file in cache_storage_root.rglob("*"):
             if not cache_file.is_file():
@@ -297,6 +380,7 @@ class GeForceNowSourceIterable(SourceIterable):
 
             if b"requestType=panels/Library" not in blob:
                 continue
+
             payload = self._extract_json_payload(blob)
             if payload is None:
                 continue
@@ -308,15 +392,18 @@ class GeForceNowSourceIterable(SourceIterable):
             for panel in panels:
                 if not isinstance(panel, dict) or panel.get("name") != "LIBRARY":
                     continue
+
                 sections = panel.get("sections")
                 if not isinstance(sections, list):
                     continue
+
                 for section in sections:
                     if not isinstance(section, dict):
                         continue
                     items = section.get("items")
                     if not isinstance(items, list):
                         continue
+
                     for item in items:
                         if not isinstance(item, dict):
                             continue
@@ -327,12 +414,18 @@ class GeForceNowSourceIterable(SourceIterable):
                         gfn_id = str(app.get("id") or "").strip()
                         if not gfn_id:
                             continue
-                        appid_entry = by_gfn_id.get(gfn_id)
-                        if appid_entry is None:
+
+                        catalog_entry = catalog.get(gfn_id)
+                        if not isinstance(catalog_entry, dict):
                             continue
 
-                        appid, catalog_entry = appid_entry
-                        title = str(app.get("title") or "").strip()
+                        cms_id = str(catalog_entry.get("cms_id") or "").strip()
+                        if not cms_id.isdigit():
+                            continue
+
+                        fallback_title = str(catalog_entry.get("title") or "").strip()
+                        panel_cover_url = self._best_online_cover_url(app.get("images"))
+
                         variants = app.get("variants")
                         if not isinstance(variants, list):
                             continue
@@ -340,8 +433,9 @@ class GeForceNowSourceIterable(SourceIterable):
                         for variant in variants:
                             if not isinstance(variant, dict):
                                 continue
-                            app_store = str(variant.get("appStore") or "").upper()
-                            if app_store != "STEAM":
+
+                            app_store = str(variant.get("appStore") or "").strip().upper()
+                            if not app_store:
                                 continue
 
                             gfn_state = variant.get("gfn")
@@ -351,78 +445,160 @@ class GeForceNowSourceIterable(SourceIterable):
                             if not isinstance(library_state, dict):
                                 continue
 
-                            status = str(library_state.get("status") or "").upper()
+                            status = str(library_state.get("status") or "").strip().upper()
                             selected = bool(library_state.get("selected"))
                             if not selected and status not in GFN_LIBRARY_OWNED_STATUSES:
                                 continue
 
-                            if appid not in owned_games:
-                                owned_games[appid] = (
-                                    title or str(catalog_entry.get("title") or f"Steam {appid}")
+                            variant_id = str(variant.get("id") or "").strip()
+                            catalog_variant = self._catalog_variant_for_library_variant(
+                                catalog_entry,
+                                app_store=app_store,
+                                variant_id=variant_id,
+                            )
+                            store_id = (
+                                str(catalog_variant.get("store_id") or "").strip()
+                                if catalog_variant
+                                else ""
+                            )
+                            short_name = str(variant.get("shortName") or "").strip()
+                            if not short_name and catalog_variant is not None:
+                                short_name = str(catalog_variant.get("short_name") or "").strip()
+                            if not short_name:
+                                short_name = (
+                                    variant_id if variant_id.isdigit() else GFN_DEFAULT_SHORT_NAME
                                 )
 
-                            short_name = str(variant.get("shortName") or "").strip()
-                            variant_id = str(variant.get("id") or "").strip()
-                            route_overrides[appid] = {
-                                "short_name": short_name
-                                or (variant_id if variant_id.isdigit() else "game_gfn_pc"),
+                            game_token = self._library_game_token(
+                                app_store=app_store,
+                                store_id=store_id,
+                                variant_id=variant_id,
+                                parent_game_id=gfn_id,
+                            )
+                            if not game_token:
+                                continue
+
+                            title = str(app.get("title") or "").strip() or fallback_title
+                            steam_appid = (
+                                store_id
+                                if app_store == "STEAM" and store_id.isdigit()
+                                else ""
+                            )
+                            online_cover_url = (
+                                self._steam_cover_url(steam_appid)
+                                if steam_appid
+                                else (panel_cover_url or "")
+                            )
+
+                            priority = self._library_variant_priority(
+                                selected=selected,
+                                status=status,
+                            )
+
+                            existing = owned_games.get(game_token)
+                            if existing is not None:
+                                existing_priority = int(existing.get("_priority", 0))
+                                if existing_priority > priority:
+                                    continue
+                                if (
+                                    existing_priority == priority
+                                    and existing.get("online_cover_url")
+                                    and not online_cover_url
+                                ):
+                                    continue
+
+                            owned_games[game_token] = {
+                                "name": title or game_token,
+                                "cms_id": cms_id,
+                                "short_name": short_name,
                                 "parent_game_id": gfn_id,
+                                "steam_appid": steam_appid,
+                                "online_cover_url": online_cover_url,
+                                "_priority": priority,
                             }
 
-        return owned_games, route_overrides
+        return owned_games
 
     def __iter__(self):
         if not self.source.gfn_client_detected:
             return
 
-        steam_catalog = self.source.steam_catalog()
-        if not steam_catalog:
+        catalog = self.source.catalog()
+        if not catalog:
             return
 
-        cached_library_games, route_overrides = self._cached_gfn_library_games(
-            steam_catalog
-        )
+        owned_games = self._cached_gfn_library_games(catalog)
+        steam_catalog = self.source.steam_variant_catalog(catalog)
+
         installed_steam_games, steam_root = self._installed_steam_games()
         local_steam_games = self._local_steam_owned_games(steam_root, steam_catalog)
         public_steam_games = {}
-        if not cached_library_games and not local_steam_games:
+        if not owned_games and not local_steam_games:
             public_steam_games = self._public_steam_games(steam_root)
 
-        owned_games: dict[str, str] = dict(cached_library_games)
-        owned_games.update(local_steam_games)
-        owned_games.update(public_steam_games)
-        owned_games.update(installed_steam_games)
-        if not owned_games:
-            return
+        steam_owned_games: dict[str, str] = dict(local_steam_games)
+        steam_owned_games.update(public_steam_games)
+        steam_owned_games.update(installed_steam_games)
 
-        for appid, name in sorted(
-            owned_games.items(),
-            key=lambda row: (row[1].casefold(), int(row[0])),
-        ):
+        for appid, name in steam_owned_games.items():
             catalog_entry = steam_catalog.get(appid)
             if catalog_entry is None:
                 continue
 
+            game_token = _sanitize_game_token(appid)
+            if game_token in owned_games:
+                continue
+
+            owned_games[game_token] = {
+                "name": name or str(catalog_entry.get("title") or f"Steam {appid}"),
+                "cms_id": str(catalog_entry.get("cms_id") or "").strip(),
+                "short_name": str(catalog_entry.get("short_name") or "").strip()
+                or GFN_DEFAULT_SHORT_NAME,
+                "parent_game_id": str(catalog_entry.get("gfn_id") or "").strip(),
+                "steam_appid": appid,
+                "online_cover_url": self._steam_cover_url(appid),
+                "_priority": 0,
+            }
+
+        if not owned_games:
+            return
+
+        for game_token, entry in sorted(
+            owned_games.items(),
+            key=lambda row: (
+                str(row[1].get("name") or "").casefold(),
+                str(row[0]),
+            ),
+        ):
+            cms_id = str(entry.get("cms_id") or "").strip()
+            if not cms_id.isdigit():
+                continue
+
+            short_name = str(entry.get("short_name") or "").strip() or GFN_DEFAULT_SHORT_NAME
+            parent_game_id = str(entry.get("parent_game_id") or "").strip()
+
             values = {
                 "source": self.source.source_id,
                 "added": shared.import_time,
-                "name": name or catalog_entry["title"],
-                "game_id": self.source.game_id_format.format(game_id=appid),
+                "name": str(entry.get("name") or game_token),
+                "game_id": self.source.game_id_format.format(game_id=game_token),
                 "executable": self.source.make_executable(
-                    cms_id=catalog_entry["cms_id"],
-                    short_name=route_overrides.get(appid, {}).get(
-                        "short_name", "game_gfn_pc"
-                    ),
-                    parent_game_id=route_overrides.get(appid, {}).get(
-                        "parent_game_id", catalog_entry["gfn_id"]
-                    ),
+                    cms_id=cms_id,
+                    short_name=short_name,
+                    parent_game_id=parent_game_id,
                 ),
             }
             game = Game(values)
-            additional_data = {
-                "steam_appid": appid,
-                "online_cover_url": f"https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/library_600x900.jpg",
-            }
+
+            additional_data: dict[str, Any] = {}
+            steam_appid = str(entry.get("steam_appid") or "").strip()
+            if steam_appid.isdigit():
+                additional_data["steam_appid"] = steam_appid
+
+            online_cover_url = str(entry.get("online_cover_url") or "").strip()
+            if online_cover_url:
+                additional_data["online_cover_url"] = online_cover_url
+
             yield game, additional_data
 
 
@@ -434,12 +610,12 @@ class GeForceNowSource(Source):
     flatpak_app_id = "com.nvidia.geforcenow"
 
     locations: tuple[()]
-    _steam_catalog_cache: dict[str, dict[str, str]] | None
+    _catalog_cache: dict[str, dict[str, Any]] | None
 
     def __init__(self) -> None:
         super().__init__()
         self.locations = ()
-        self._steam_catalog_cache = None
+        self._catalog_cache = None
 
     @property
     def gfn_client_detected(self) -> bool:
@@ -469,7 +645,7 @@ class GeForceNowSource(Source):
     def _cache_path(self) -> Path:
         cache_dir = shared.cache_dir / shared.DATA_DIR_NAME
         cache_dir.mkdir(parents=True, exist_ok=True)
-        return cache_dir / "geforcenow-catalog-steam.json"
+        return cache_dir / "geforcenow-catalog.json"
 
     def gfn_cache_storage_path(self) -> Path | None:
         candidates = (
@@ -500,7 +676,116 @@ class GeForceNowSource(Source):
                 return candidate
         return None
 
-    def _load_catalog_cache(self) -> dict[str, dict[str, str]] | None:
+    @staticmethod
+    def _normalize_catalog(
+        raw_catalog: Any,
+    ) -> dict[str, dict[str, Any]] | None:
+        if not isinstance(raw_catalog, dict):
+            return None
+
+        normalized: dict[str, dict[str, Any]] = {}
+        for gfn_id, entry in raw_catalog.items():
+            if not isinstance(gfn_id, str):
+                continue
+            gfn_id = gfn_id.strip()
+            if not gfn_id:
+                continue
+            if not isinstance(entry, dict):
+                continue
+
+            cms_id = str(entry.get("cms_id", "")).strip()
+            title = str(entry.get("title", "")).strip()
+            if not (cms_id.isdigit() and title):
+                continue
+
+            raw_variants = entry.get("variants")
+            if not isinstance(raw_variants, list):
+                raw_variants = []
+
+            seen_variants: set[tuple[str, str, str]] = set()
+            variants: list[dict[str, str]] = []
+            for variant in raw_variants:
+                if not isinstance(variant, dict):
+                    continue
+
+                app_store = str(variant.get("app_store", "")).strip().upper()
+                if not app_store:
+                    continue
+
+                os_type = str(variant.get("os_type", "")).strip().upper()
+                if os_type and os_type != "WINDOWS":
+                    continue
+
+                variant_id = str(variant.get("variant_id", "")).strip()
+                store_id = str(variant.get("store_id", "")).strip()
+                short_name = str(variant.get("short_name", "")).strip()
+
+                signature = (app_store, variant_id, store_id)
+                if signature in seen_variants:
+                    continue
+                seen_variants.add(signature)
+
+                variants.append(
+                    {
+                        "app_store": app_store,
+                        "variant_id": variant_id,
+                        "store_id": store_id,
+                        "short_name": short_name,
+                        "os_type": os_type or "WINDOWS",
+                    }
+                )
+
+            normalized[gfn_id] = {
+                "cms_id": cms_id,
+                "title": title,
+                "variants": variants,
+            }
+
+        return normalized or None
+
+    @staticmethod
+    def _legacy_steam_catalog_to_catalog(
+        legacy_steam_catalog: dict[str, Any],
+    ) -> dict[str, dict[str, Any]] | None:
+        converted: dict[str, dict[str, Any]] = {}
+        for appid, entry in legacy_steam_catalog.items():
+            if not isinstance(appid, str) or not appid.isdigit():
+                continue
+            if not isinstance(entry, dict):
+                continue
+
+            cms_id = str(entry.get("cms_id", "")).strip()
+            title = str(entry.get("title", "")).strip()
+            gfn_id = str(entry.get("gfn_id", "")).strip()
+            if not (cms_id.isdigit() and title and gfn_id):
+                continue
+
+            catalog_entry = converted.setdefault(
+                gfn_id,
+                {"cms_id": cms_id, "title": title, "variants": []},
+            )
+            if not catalog_entry.get("cms_id"):
+                catalog_entry["cms_id"] = cms_id
+            if not catalog_entry.get("title"):
+                catalog_entry["title"] = title
+
+            variants = catalog_entry.setdefault("variants", [])
+            if not isinstance(variants, list):
+                variants = []
+                catalog_entry["variants"] = variants
+            variants.append(
+                {
+                    "app_store": "STEAM",
+                    "variant_id": "",
+                    "store_id": appid,
+                    "short_name": GFN_DEFAULT_SHORT_NAME,
+                    "os_type": "WINDOWS",
+                }
+            )
+
+        return GeForceNowSource._normalize_catalog(converted)
+
+    def _load_catalog_cache(self) -> dict[str, dict[str, Any]] | None:
         path = self._cache_path
         if not path.is_file():
             return None
@@ -518,29 +803,20 @@ class GeForceNowSource(Source):
         if int(time()) - int(updated_at) > GFN_CACHE_TTL_SECONDS:
             return None
 
-        steam_catalog = payload.get("steam_catalog")
-        if not isinstance(steam_catalog, dict):
-            return None
+        catalog = self._normalize_catalog(payload.get("catalog"))
+        if catalog is not None:
+            return catalog
 
-        normalized: dict[str, dict[str, str]] = {}
-        for appid, entry in steam_catalog.items():
-            if not isinstance(appid, str) or not appid.isdigit():
-                continue
-            if not isinstance(entry, dict):
-                continue
-            cms_id = str(entry.get("cms_id", "")).strip()
-            title = str(entry.get("title", "")).strip()
-            gfn_id = str(entry.get("gfn_id", "")).strip()
-            if not (cms_id.isdigit() and title and gfn_id):
-                continue
-            normalized[appid] = {"cms_id": cms_id, "title": title, "gfn_id": gfn_id}
-        return normalized or None
+        legacy = payload.get("steam_catalog")
+        if isinstance(legacy, dict):
+            return self._legacy_steam_catalog_to_catalog(legacy)
+        return None
 
-    def _save_catalog_cache(self, steam_catalog: dict[str, dict[str, str]]) -> None:
+    def _save_catalog_cache(self, catalog: dict[str, dict[str, Any]]) -> None:
         path = self._cache_path
         payload = {
             "updated_at": int(time()),
-            "steam_catalog": steam_catalog,
+            "catalog": catalog,
         }
         try:
             path.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
@@ -552,7 +828,7 @@ class GeForceNowSource(Source):
         query = (
             f'{{ apps(country:"US", language:"en_US", after: "{after}") '
             "{ pageInfo { hasNextPage endCursor } "
-            "items { id cmsId title type variants { id title appStore osType storeId } } "
+            "items { id cmsId title type variants { id title appStore osType storeId shortName } } "
             "} }"
         )
         try:
@@ -580,9 +856,10 @@ class GeForceNowSource(Source):
         end_cursor = str(page_info.get("endCursor") or "")
         return items, has_next_page, end_cursor
 
-    def _fetch_catalog(self) -> dict[str, dict[str, str]]:
+    def _fetch_catalog(self) -> dict[str, dict[str, Any]]:
         after = ""
-        steam_catalog: dict[str, dict[str, str]] = {}
+        catalog: dict[str, dict[str, Any]] = {}
+        seen_variants: dict[str, set[tuple[str, str, str]]] = {}
         for _page in range(GFN_MAX_PAGES):
             try:
                 items, has_next_page, end_cursor = self._query_catalog_page(after)
@@ -606,52 +883,119 @@ class GeForceNowSource(Source):
                 if not (title and gfn_id and cms_id.isdigit()):
                     continue
 
+                catalog_entry = catalog.setdefault(
+                    gfn_id,
+                    {"cms_id": cms_id, "title": title, "variants": []},
+                )
+                if not str(catalog_entry.get("cms_id") or "").isdigit():
+                    catalog_entry["cms_id"] = cms_id
+                if not str(catalog_entry.get("title") or "").strip():
+                    catalog_entry["title"] = title
+
                 variants = item.get("variants") or []
                 if not isinstance(variants, list):
                     continue
+                variant_signatures = seen_variants.setdefault(gfn_id, set())
                 for variant in variants:
                     if not isinstance(variant, dict):
                         continue
 
                     app_store = str(variant.get("appStore") or "").upper()
                     os_type = str(variant.get("osType") or "").upper()
-                    appid = str(variant.get("storeId") or "").strip()
-                    if app_store != "STEAM" or os_type != "WINDOWS" or not appid.isdigit():
+                    if not app_store or (os_type and os_type != "WINDOWS"):
                         continue
 
-                    if appid not in steam_catalog:
-                        steam_catalog[appid] = {
-                            "cms_id": cms_id,
-                            "title": title,
-                            "gfn_id": gfn_id,
+                    variant_id = str(variant.get("id") or "").strip()
+                    store_id = str(variant.get("storeId") or "").strip()
+                    short_name = str(variant.get("shortName") or "").strip()
+                    signature = (app_store, variant_id, store_id)
+                    if signature in variant_signatures:
+                        continue
+                    variant_signatures.add(signature)
+
+                    raw_variants = catalog_entry.get("variants")
+                    if not isinstance(raw_variants, list):
+                        raw_variants = []
+                        catalog_entry["variants"] = raw_variants
+                    raw_variants.append(
+                        {
+                            "app_store": app_store,
+                            "variant_id": variant_id,
+                            "store_id": store_id,
+                            "short_name": short_name,
+                            "os_type": os_type or "WINDOWS",
                         }
+                    )
 
             if not has_next_page or not end_cursor:
                 break
             after = end_cursor
 
-        return steam_catalog
+        return catalog
 
-    def steam_catalog(self) -> dict[str, dict[str, str]]:
-        if self._steam_catalog_cache is not None:
-            return self._steam_catalog_cache
+    def catalog(self) -> dict[str, dict[str, Any]]:
+        if self._catalog_cache is not None:
+            return self._catalog_cache
 
         cached = self._load_catalog_cache()
         if cached is not None:
-            self._steam_catalog_cache = cached
-            return self._steam_catalog_cache
+            self._catalog_cache = cached
+            return self._catalog_cache
 
         fetched = self._fetch_catalog()
-        self._steam_catalog_cache = fetched
+        self._catalog_cache = fetched
         if fetched:
             self._save_catalog_cache(fetched)
-        return self._steam_catalog_cache
+        return self._catalog_cache
+
+    @staticmethod
+    def steam_variant_catalog(
+        catalog: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, str]]:
+        steam_catalog: dict[str, dict[str, str]] = {}
+        for gfn_id, entry in catalog.items():
+            if not isinstance(entry, dict):
+                continue
+
+            cms_id = str(entry.get("cms_id") or "").strip()
+            title = str(entry.get("title") or "").strip()
+            if not (cms_id.isdigit() and title and gfn_id):
+                continue
+
+            variants = entry.get("variants")
+            if not isinstance(variants, list):
+                continue
+
+            for variant in variants:
+                if not isinstance(variant, dict):
+                    continue
+
+                app_store = str(variant.get("app_store") or "").strip().upper()
+                if app_store != "STEAM":
+                    continue
+
+                appid = str(variant.get("store_id") or "").strip()
+                if not appid.isdigit():
+                    continue
+                if appid in steam_catalog:
+                    continue
+
+                steam_catalog[appid] = {
+                    "cms_id": cms_id,
+                    "title": title,
+                    "gfn_id": gfn_id,
+                    "short_name": str(variant.get("short_name") or "").strip(),
+                }
+        return steam_catalog
+
+    def steam_catalog(self) -> dict[str, dict[str, str]]:
+        return self.steam_variant_catalog(self.catalog())
 
     def make_executable(
         self,
         *,
         cms_id: str,
-        short_name: str = "game_gfn_pc",
+        short_name: str = GFN_DEFAULT_SHORT_NAME,
         parent_game_id: str = "",
     ) -> str:
         safe_cms_id = quote(str(cms_id).strip(), safe="")
@@ -660,7 +1004,7 @@ class GeForceNowSource(Source):
         route = (
             f"#?cmsId={safe_cms_id}"
             "&launchSource=External"
-            f"&shortName={safe_short_name or 'game_gfn_pc'}"
+            f"&shortName={safe_short_name or GFN_DEFAULT_SHORT_NAME}"
             f"&parentGameId={safe_parent_game_id}"
         )
         return (
