@@ -129,14 +129,14 @@ GeForce NOW notes:
 
 - Requires NVIDIA GeForce NOW Flatpak (`com.nvidia.geforcenow`) installed.
 - Imports linked GeForce NOW library entries from local GeForce NOW cache:
-  - `.../CefCache/Default/Service Worker/CacheStorage`
-- Supports entries across linked stores when present in your GFN library:
-  - Steam
-  - Xbox / Game Pass
-  - Epic
-  - Ubisoft Connect
-  - EA App
-- Uses the GeForce NOW catalog API to resolve launch-route metadata (`cmsId`, variant routing, parent game id).
+  - `~/.var/app/com.nvidia.geforcenow/.local/state/NVIDIA/GeForceNOW/CefCache/Default/Service Worker/CacheStorage`
+  - `~/.local/state/NVIDIA/GeForceNOW/CefCache/Default/Service Worker/CacheStorage` (fallback)
+- Uses the GeForce NOW catalog API to resolve launch-route metadata (`cmsId`, `shortName`, `parentGameId`, store variant ids).
+- Launches through the GeForce NOW Flatpak entrypoint with `--url-route`:
+  - `flatpak run --command=/app/cef/GeForceNOW com.nvidia.geforcenow '--url-route=#?cmsId=...&launchSource=External&shortName=...&parentGameId=...'`
+- Supports linked store variants present in your GFN library (Steam, Epic, Xbox/Game Pass, Ubisoft Connect, EA App, and other stores exposed by GFN variants).
+- Persists store metadata on imported games so details can show source + store (text and logo when a logo asset exists).
+- Re-import does not create duplicate entries for existing IDs; it refreshes launch/store metadata when values change.
 - Installed Steam titles are still considered.
 - Steam games you own but do not have installed are read from local Steam data (`userdata/*/config/localconfig.vdf`) when available.
 - Public Steam profile lookup is only a fallback when local Steam ownership data is unavailable and GFN library cache data is unavailable.
@@ -154,7 +154,7 @@ GeForce NOW notes:
   - `Added`
   - source groups
   - custom categories (if assigned)
-- Search filters by title, metadata fields, and categories.
+- Search filters by title, source/store metadata fields, and categories.
 - Sort modes include A-Z, Z-A, newest, oldest, and last played.
 
 ### Game details
@@ -169,6 +169,7 @@ From details view you can:
 - Refresh metadata
 - Change cover
 - Manage categories
+- View GeForce NOW source + store badges (for example Steam, Epic, Ubisoft, Xbox) when store metadata is available
 
 Click outside the details card to return to the main library.
 
@@ -264,6 +265,7 @@ Klay uses its own namespace:
 - For non-Steam titles, make sure the platform account is connected in GeForce NOW and the game appears in your GFN `Library`.
 - Ensure Steam has logged in at least once on this machine so local ownership data exists under `userdata/*/config/localconfig.vdf`.
 - If local ownership data is missing, Klay falls back to Steam profile lookup.
+- If import reports duplicates for GFN games, that is expected for already-imported entries; Klay still refreshes metadata such as store/source/executable.
 
 ### GeForce NOW auto-close not working
 
