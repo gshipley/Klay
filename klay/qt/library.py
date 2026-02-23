@@ -49,6 +49,10 @@ class GameEntry:
         return str(self.data.get("source") or "")
 
     @property
+    def store(self) -> str:
+        return str(self.data.get("store") or "")
+
+    @property
     def publisher(self) -> str:
         return str(self.data.get("publisher") or "")
 
@@ -232,6 +236,7 @@ class GameLibrary:
         normalized["game_id"] = str(normalized.get("game_id", "")).strip()
         normalized["name"] = str(normalized.get("name", "")).strip()
         normalized["source"] = str(normalized.get("source", "")).strip()
+        normalized["store"] = _clean_text(normalized.get("store"))
         normalized["developer"] = _clean_text(normalized.get("developer"))
         normalized["publisher"] = _clean_text(normalized.get("publisher"))
         normalized["release_date"] = _clean_text(normalized.get("release_date"))

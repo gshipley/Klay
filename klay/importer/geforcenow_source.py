@@ -512,6 +512,7 @@ class GeForceNowSourceIterable(SourceIterable):
                                 "cms_id": cms_id,
                                 "short_name": short_name,
                                 "parent_game_id": gfn_id,
+                                "store": app_store,
                                 "steam_appid": steam_appid,
                                 "online_cover_url": online_cover_url,
                                 "_priority": priority,
@@ -555,6 +556,7 @@ class GeForceNowSourceIterable(SourceIterable):
                 "short_name": str(catalog_entry.get("short_name") or "").strip()
                 or GFN_DEFAULT_SHORT_NAME,
                 "parent_game_id": str(catalog_entry.get("gfn_id") or "").strip(),
+                "store": "STEAM",
                 "steam_appid": appid,
                 "online_cover_url": self._steam_cover_url(appid),
                 "_priority": 0,
@@ -591,6 +593,10 @@ class GeForceNowSourceIterable(SourceIterable):
             game = Game(values)
 
             additional_data: dict[str, Any] = {}
+            store = str(entry.get("store") or "").strip()
+            if store:
+                additional_data["store"] = store
+
             steam_appid = str(entry.get("steam_appid") or "").strip()
             if steam_appid.isdigit():
                 additional_data["steam_appid"] = steam_appid

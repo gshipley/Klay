@@ -94,6 +94,7 @@ class FakeGame:
             "name": "",
             "removed": False,
             "source": "",
+            "store": None,
             "version": 1.5,
         }
         defaults.update(data)
@@ -395,9 +396,15 @@ def _game_to_data(game: Any) -> dict[str, Any]:
         "name": str(getattr(game, "name", "")),
         "removed": bool(getattr(game, "removed", False)),
         "source": str(getattr(game, "source", "")),
+        "store": _text(getattr(game, "store", None)),
         "version": float(getattr(game, "version", 1.5)),
     }
     return data
+
+
+def _coerce_store(value: Any) -> str | None:
+    text = str(value).strip() if value is not None else ""
+    return text or None
 
 
 def _coerce_playtime_minutes(value: Any) -> int | None:
@@ -423,6 +430,17 @@ def _apply_playtime_minutes(target: dict[str, Any], playtime_value: Any) -> bool
     return True
 
 
+def _apply_store(target: dict[str, Any], store_value: Any) -> bool:
+    store = _coerce_store(store_value)
+    if store is None:
+        return False
+    current = _coerce_store(target.get("store"))
+    if current == store:
+        return False
+    target["store"] = store
+    return True
+
+
 def _sync_existing_from_scan(
     existing: dict[str, Any], scanned: dict[str, Any]
 ) -> bool:
@@ -433,7 +451,7 @@ def _sync_existing_from_scan(
     source backends to update executable routes and renamed entries.
     """
     changed = False
-    for key in ("name", "source", "executable"):
+    for key in ("name", "source", "store", "executable"):
         value = scanned.get(key)
         if value in (None, ""):
             continue
@@ -463,6 +481,7 @@ def _normalize_metadata_fields(data: dict[str, Any]) -> None:
     data["release_date"] = _clean_text(data.get("release_date"))
     data["summary"] = _clean_text(data.get("summary"))
     data["website"] = _clean_text(data.get("website"))
+    data["store"] = _clean_text(data.get("store"))
     metacritic = data.get("metacritic_score")
     try:
         data["metacritic_score"] = int(metacritic) if metacritic is not None else None
@@ -1478,6 +1497,8 @@ def _run_import() -> dict[str, Any]:
             if existing and not existing.get("removed", False):
                 summary.duplicates += 1
                 metadata_updated = _sync_existing_from_scan(existing, game_data)
+                if _apply_store(existing, additional_data.get("store")):
+                    metadata_updated = True
 
                 if steam_api_helper and _needs_online_metadata(existing):
                     online_data = _resolve_steam_online_data(
@@ -1564,6 +1585,7 @@ def _run_import() -> dict[str, Any]:
                 game_data["added"] = int(existing.get("added", game_data["added"]))
                 game_data["categories"] = list(existing.get("categories", []) or [])
 
+            _apply_store(game_data, additional_data.get("store"))
             if steam_api_helper:
                 online_data = _resolve_steam_online_data(
                     steam_api_helper=steam_api_helper,

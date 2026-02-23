@@ -5,6 +5,7 @@ from functools import lru_cache
 from html import escape
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -81,6 +82,8 @@ ROLE_SIDEBAR_HEADING = Qt.ItemDataRole.UserRole + 6
 ROLE_PLAYTIME = Qt.ItemDataRole.UserRole + 7
 
 COVER_SIZE = QSize(200, 300)
+DETAILS_BADGE_LABEL_SIZE = QSize(108, 108)
+DETAILS_BADGE_ICON_SIZE = QSize(108, 108)
 CATEGORY_FILTER_PREFIX = "category:"
 ALL_GAMES_EXCLUDED_SOURCES_DEFAULT = frozenset({"geforcenow"})
 GEFORCENOW_STATE_SUBPATH = Path(
@@ -129,6 +132,130 @@ def _fmt_playtime_minutes(minutes: int | None) -> str:
             return f"Played: {hours}h {rem_minutes}m"
         return f"Played: {hours}h"
     return f"Played: {rem_minutes}m"
+
+
+def _store_display_name(store: str) -> str:
+    token = str(store).strip()
+    if not token:
+        return ""
+    normalized = re.sub(r"[^a-z0-9]+", "_", token.lower()).strip("_")
+    aliases = {
+        "steam": "Steam",
+        "epic": "Epic Games Store",
+        "epic_games": "Epic Games Store",
+        "ubisoft": "Ubisoft Connect",
+        "ubisoft_connect": "Ubisoft Connect",
+        "xbox": "Xbox",
+        "game_pass": "Xbox Game Pass",
+        "gamepass": "Xbox Game Pass",
+        "microsoft_store": "Microsoft Store",
+        "ea": "EA App",
+        "ea_app": "EA App",
+        "eaapp": "EA App",
+        "gog": "GOG",
+        "battle_net": "Battle.net",
+        "battlenet": "Battle.net",
+        "bnet": "Battle.net",
+        "rockstar": "Rockstar Games Launcher",
+    }
+    if normalized in aliases:
+        return aliases[normalized]
+    fallback = " ".join(part for part in re.split(r"[_\s]+", token) if part)
+    return fallback.title()
+
+
+def _store_logo_slug(store: str) -> str:
+    token = str(store).strip()
+    if not token:
+        return ""
+    normalized = re.sub(r"[^a-z0-9]+", "_", token.lower()).strip("_")
+    aliases = {
+        "steam": "steam",
+        "epic": "epic",
+        "epic_games": "epic",
+        "ubisoft": "ubisoft",
+        "ubisoft_connect": "ubisoft",
+        "uplay": "ubisoft",
+        "xbox": "xbox",
+        "game_pass": "xbox",
+        "gamepass": "xbox",
+        "microsoft_store": "xbox",
+        "ea": "ea",
+        "ea_app": "ea",
+        "eaapp": "ea",
+        "gog": "gog",
+        "battle_net": "battle_net",
+        "battlenet": "battle_net",
+        "bnet": "battle_net",
+        "rockstar": "rockstar",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _store_logo_icon(store: str) -> QIcon:
+    slug = _store_logo_slug(store)
+    if not slug:
+        return QIcon()
+
+    slug_aliases = {
+        "ubisoft": ("uplay", "ubisoft_connect"),
+        "xbox": ("game_pass", "microsoft_store"),
+        "battle_net": ("battlenet", "bnet"),
+        "ea": ("ea_app",),
+        "epic": ("epic_games",),
+    }
+    candidates = [slug]
+    candidates.extend(slug_aliases.get(slug, ()))
+
+    preferred_files_by_slug = {
+        "xbox": ("xbox_logo.png", "xbox_logo.jpg", "xbox_logo.svg"),
+        "ubisoft": ("ubisoft_logo.png",),
+    }
+
+    for key in dict.fromkeys(candidates):
+        preferred_files = preferred_files_by_slug.get(key, ())
+        for icon_name in preferred_files:
+            for path in (_asset_path("images", icon_name), _project_root() / icon_name):
+                if not path.is_file():
+                    continue
+                icon = QIcon(str(path))
+                if not icon.isNull():
+                    return icon
+
+        for icon_name in (
+            f"{key}_logo.png",
+            f"{key}_logo.svg",
+            f"{key}_logo.webp",
+            f"{key}_logo.jpg",
+            f"{key}_logo.jpeg",
+            f"{key}-logo.png",
+            f"{key}-logo.svg",
+            f"{key}-logo.webp",
+            f"{key}-logo.jpg",
+            f"{key}-logo.jpeg",
+        ):
+            for path in (_asset_path("images", icon_name), _project_root() / icon_name):
+                if not path.is_file():
+                    continue
+                icon = QIcon(str(path))
+                if not icon.isNull():
+                    return icon
+    return QIcon()
+
+
+def _infer_geforcenow_store(game: GameEntry) -> str:
+    if game.base_source != "geforcenow":
+        return ""
+    game_id = str(game.game_id or "").strip()
+    prefix = "geforcenow_"
+    if not game_id.startswith(prefix):
+        return ""
+    token = game_id[len(prefix) :]
+    if token.isdigit():
+        return "steam"
+    if "_" not in token:
+        return ""
+    return token.split("_", 1)[0]
 
 
 def _normalize_name(name: str) -> str:
@@ -296,6 +423,50 @@ def _fit_cover(pixmap: QPixmap, target_size: QSize) -> QPixmap:
     x = max(0, (scaled.width() - target_size.width()) // 2)
     y = max(0, (scaled.height() - target_size.height()) // 2)
     return scaled.copy(x, y, target_size.width(), target_size.height())
+
+
+def _trim_transparent_edges(pixmap: QPixmap) -> QPixmap:
+    if pixmap.isNull():
+        return pixmap
+    image = pixmap.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+    width = image.width()
+    height = image.height()
+    left = width
+    top = height
+    right = -1
+    bottom = -1
+
+    for y in range(height):
+        for x in range(width):
+            if image.pixelColor(x, y).alpha() <= 0:
+                continue
+            if x < left:
+                left = x
+            if y < top:
+                top = y
+            if x > right:
+                right = x
+            if y > bottom:
+                bottom = y
+
+    if right < left or bottom < top:
+        return pixmap
+
+    return pixmap.copy(left, top, right - left + 1, bottom - top + 1)
+
+
+def _details_badge_pixmap(icon: QIcon) -> QPixmap:
+    if icon.isNull():
+        return QPixmap()
+    raw = icon.pixmap(QSize(96, 96))
+    if raw.isNull():
+        return raw
+    trimmed = _trim_transparent_edges(raw)
+    return trimmed.scaled(
+        DETAILS_BADGE_ICON_SIZE,
+        Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
 
 
 def _link_html(url: str, *, color: str = "#8fd2ff") -> str:
@@ -1127,7 +1298,7 @@ class KlayMainWindow(QMainWindow):
 
         title_row = QHBoxLayout()
         title_row.setContentsMargins(0, 0, 0, 0)
-        title_row.setSpacing(12)
+        title_row.setSpacing(0)
 
         self.details_title = QLabel("Game Title")
         title_font = QFont(self.font())
@@ -1140,14 +1311,17 @@ class KlayMainWindow(QMainWindow):
 
         self.details_source_logo = QLabel()
         self.details_source_logo.setObjectName("DetailsSourceLogo")
-        self.details_source_logo.setFixedSize(48, 48)
+        self.details_source_logo.setFixedSize(DETAILS_BADGE_LABEL_SIZE)
         self.details_source_logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.details_source_logo.setToolTip("Source")
-        title_row.addWidget(
-            self.details_source_logo,
-            0,
-            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight,
-        )
+        title_row.addWidget(self.details_source_logo, 0)
+
+        self.details_store_logo = QLabel()
+        self.details_store_logo.setObjectName("DetailsStoreLogo")
+        self.details_store_logo.setFixedSize(DETAILS_BADGE_LABEL_SIZE)
+        self.details_store_logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.details_store_logo.setToolTip("Store")
+        title_row.addWidget(self.details_store_logo, 0)
         right.addLayout(title_row)
 
         self.details_developer = QLabel("")
@@ -1156,6 +1330,10 @@ class KlayMainWindow(QMainWindow):
         self.details_developer.setFont(dev_font)
         self.details_developer.setWordWrap(True)
         right.addWidget(self.details_developer)
+
+        self.details_store = QLabel("")
+        self.details_store.setWordWrap(True)
+        right.addWidget(self.details_store)
 
         self.details_publisher = QLabel("")
         self.details_publisher.setWordWrap(True)
@@ -1375,6 +1553,11 @@ class KlayMainWindow(QMainWindow):
                 background: rgba(14, 15, 18, 220);
             }
             QLabel#DetailsSourceLogo {
+                border: none;
+                background: transparent;
+                padding: 0px;
+            }
+            QLabel#DetailsStoreLogo {
                 border: none;
                 background: transparent;
                 padding: 0px;
@@ -2087,6 +2270,7 @@ class KlayMainWindow(QMainWindow):
                 for game in games
                 if term in game.name.lower()
                 or term in game.developer.lower()
+                or term in game.store.lower()
                 or term in game.publisher.lower()
                 or term in game.source.lower()
                 or any(term in category.lower() for category in game.categories)
@@ -3643,12 +3827,24 @@ class KlayMainWindow(QMainWindow):
         self.details_header_title.setText(game.name)
         self.details_title.setText(game.name)
         source_icon = _source_icon(game.base_source)
-        source_pixmap = source_icon.pixmap(QSize(36, 36))
+        source_pixmap = _details_badge_pixmap(source_icon)
         self.details_source_logo.setPixmap(source_pixmap)
         self.details_source_logo.setVisible(not source_pixmap.isNull())
         self.details_source_logo.setToolTip(self.library.source_label(game.base_source))
+        store_value = game.store or _infer_geforcenow_store(game)
+        store_name = _store_display_name(store_value)
+        store_icon = _store_logo_icon(store_value)
+        store_pixmap = _details_badge_pixmap(store_icon)
+        self.details_store_logo.setPixmap(store_pixmap)
+        self.details_store_logo.setVisible(not store_pixmap.isNull())
+        if store_name:
+            self.details_store_logo.setToolTip(f"Store: {store_name}")
+        else:
+            self.details_store_logo.setToolTip("Store")
         self.details_developer.setText(game.developer or "")
         self.details_developer.setVisible(bool(game.developer))
+        self.details_store.setText(f"Store: {store_name}" if store_name else "")
+        self.details_store.setVisible(bool(store_name))
         self.details_publisher.setText(
             f"Publisher: {game.publisher}" if game.publisher else ""
         )
