@@ -136,8 +136,8 @@ class PreferencesDialog(QDialog):
 
         tabs.addTab(self._build_general_page(), "General")
         tabs.addTab(self._build_sources_page(), "Sources")
-        tabs.addTab(self._build_geforcenow_page(), "GeForce NOW")
-        tabs.addTab(self._build_import_page(), "Import")
+        tabs.addTab(self._build_geforcenow_page(), "GeForce NOW Behavior")
+        tabs.addTab(self._build_import_page(), "Import Rules")
         tabs.addTab(self._build_categories_page(), "Categories")
         tabs.addTab(self._build_sgdb_page(), "SteamGridDB")
         tabs.addTab(self._build_igdb_page(), "IGDB")
@@ -317,59 +317,86 @@ class PreferencesDialog(QDialog):
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(10)
 
-        layout.addWidget(
-            QLabel("Source-specific import behavior:")
+        info = QLabel(
+            "Configure per-source import rules used during scans.\n"
+            "Enable/disable each source in the Sources tab."
         )
-        layout.addWidget(
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        gfn_note = QLabel(
+            "GeForce NOW has no per-source import rules. "
+            "Use Sources to enable it and GeForce NOW Behavior for its options."
+        )
+        gfn_note.setWordWrap(True)
+        gfn_note.setProperty("role", "hint")
+        layout.addWidget(gfn_note)
+
+        lutris_group = QGroupBox("Lutris")
+        lutris_layout = QVBoxLayout(lutris_group)
+        lutris_layout.setSpacing(8)
+        lutris_layout.addWidget(
             self._checkbox(
                 "lutris-import-steam",
-                "Lutris: include Steam entries",
+                "Include Steam entries",
                 default=IMPORT_BOOL_KEYS["lutris-import-steam"],
             )
         )
-        layout.addWidget(
+        lutris_layout.addWidget(
             self._checkbox(
                 "lutris-import-flatpak",
-                "Lutris: include Flatpak entries",
+                "Include Flatpak entries",
                 default=IMPORT_BOOL_KEYS["lutris-import-flatpak"],
             )
         )
-        layout.addWidget(
+        layout.addWidget(lutris_group)
+
+        heroic_group = QGroupBox("Heroic")
+        heroic_layout = QVBoxLayout(heroic_group)
+        heroic_layout.setSpacing(8)
+        heroic_layout.addWidget(
             self._checkbox(
                 "heroic-import-epic",
-                "Heroic: include Epic games",
+                "Include Epic games",
                 default=IMPORT_BOOL_KEYS["heroic-import-epic"],
             )
         )
-        layout.addWidget(
+        heroic_layout.addWidget(
             self._checkbox(
                 "heroic-import-gog",
-                "Heroic: include GOG games",
+                "Include GOG games",
                 default=IMPORT_BOOL_KEYS["heroic-import-gog"],
             )
         )
-        layout.addWidget(
+        heroic_layout.addWidget(
             self._checkbox(
                 "heroic-import-amazon",
-                "Heroic: include Amazon games",
+                "Include Amazon games",
                 default=IMPORT_BOOL_KEYS["heroic-import-amazon"],
             )
         )
-        layout.addWidget(
+        heroic_layout.addWidget(
             self._checkbox(
                 "heroic-import-sideload",
-                "Heroic: include sideload games",
+                "Include sideload games",
                 default=IMPORT_BOOL_KEYS["heroic-import-sideload"],
             )
         )
-        layout.addWidget(
+        layout.addWidget(heroic_group)
+
+        flatpak_group = QGroupBox("Flatpak")
+        flatpak_layout = QVBoxLayout(flatpak_group)
+        flatpak_layout.setSpacing(8)
+        flatpak_layout.addWidget(
             self._checkbox(
                 "flatpak-import-launchers",
-                "Flatpak: include launcher apps",
+                "Include launcher apps",
                 default=IMPORT_BOOL_KEYS["flatpak-import-launchers"],
             )
         )
-        import_now_button = QPushButton("Import Games Now")
+        layout.addWidget(flatpak_group)
+
+        import_now_button = QPushButton("Run Import Now (all enabled sources)")
         import_now_button.clicked.connect(self._request_import)
         layout.addWidget(import_now_button, alignment=Qt.AlignmentFlag.AlignLeft)
         layout.addStretch(1)
@@ -382,16 +409,19 @@ class PreferencesDialog(QDialog):
         layout.setSpacing(10)
 
         info = QLabel(
-            "Configure GeForce NOW-specific library behavior.\n"
-            "Source enablement remains in the Sources tab."
+            "Enable/disable GeForce NOW in the Sources tab.\n"
+            "These settings only control GeForce NOW behavior."
         )
         info.setWordWrap(True)
         layout.addWidget(info)
 
-        layout.addWidget(
+        visibility_group = QGroupBox("Library visibility")
+        visibility_layout = QVBoxLayout(visibility_group)
+        visibility_layout.setSpacing(8)
+        visibility_layout.addWidget(
             self._checkbox(
                 "geforcenow-include-in-all-games",
-                "Include GeForce NOW games in All Games",
+                "Show GeForce NOW games in All Games",
                 default=GENERAL_BOOL_KEYS["geforcenow-include-in-all-games"],
                 tooltip=(
                     "When disabled, GeForce NOW games appear only in the GeForce NOW"
@@ -399,10 +429,15 @@ class PreferencesDialog(QDialog):
                 ),
             )
         )
-        layout.addWidget(
+        layout.addWidget(visibility_group)
+
+        runtime_group = QGroupBox("Runtime behavior")
+        runtime_layout = QVBoxLayout(runtime_group)
+        runtime_layout.setSpacing(8)
+        runtime_layout.addWidget(
             self._checkbox(
                 "geforcenow-close-on-stream-end",
-                "Close GeForce NOW after stream ends (best effort)",
+                "Auto-close GeForce NOW after stream ends (best effort)",
                 default=GENERAL_BOOL_KEYS["geforcenow-close-on-stream-end"],
                 tooltip=(
                     "Monitors GeForce NOW logs for stream-end events and closes the"
@@ -410,6 +445,7 @@ class PreferencesDialog(QDialog):
                 ),
             )
         )
+        layout.addWidget(runtime_group)
 
         layout.addStretch(1)
         return page
