@@ -94,6 +94,7 @@ Run:
 - Python 3
 - PySide6 (Qt frontend)
 - PyGObject (`gi`, GLib/Gio bindings used by import backends/settings)
+- Brotli Python module (needed for full GeForce NOW library cache decoding)
 
 Fedora:
 
@@ -101,15 +102,18 @@ Fedora:
 sudo dnf install python3-pyside6 python3-gobject
 ```
 
+Install the Brotli Python module from your distro packages as well if you want full GeForce NOW library imports from a source build.
+
 Pip (user install):
 
 ```bash
-python3 -m pip install --user PySide6
+python3 -m pip install --user PySide6 Brotli
 ```
 
 Optional:
 
 - `ffprobe` for accurate splash sound duration detection
+- For source builds, make sure `python3 -c "import brotli"` works in the same Python environment that launches `./_build/klay/klay` if you want full GeForce NOW library imports instead of preview-only fallback.
 
 ## CLI Options
 
@@ -129,12 +133,23 @@ GeForce NOW notes:
 
 - Requires NVIDIA GeForce NOW Flatpak (`com.nvidia.geforcenow`) installed.
 - Imports linked GeForce NOW library entries from local GeForce NOW cache:
+  - Full owned-library pages from Chromium HTTP cache:
+    - `~/.var/app/com.nvidia.geforcenow/.local/state/NVIDIA/GeForceNOW/CefCache/Default/Cache/Cache_Data`
+    - `~/.local/state/NVIDIA/GeForceNOW/CefCache/Default/Cache/Cache_Data` (fallback)
   - `~/.var/app/com.nvidia.geforcenow/.local/state/NVIDIA/GeForceNOW/CefCache/Default/Service Worker/CacheStorage`
   - `~/.local/state/NVIDIA/GeForceNOW/CefCache/Default/Service Worker/CacheStorage` (fallback)
+- Full-library import behavior:
+  - Klay prefers cached `requestType=apps` GeForce NOW responses from the Chromium HTTP cache because those correspond to the full owned-library view and include pagination.
+  - If those responses are missing or cannot be decoded, Klay falls back to the smaller `panels/Library` preview data from the service-worker cache.
+  - Steam ownership data can still supplement supported Steam titles that are not already present in the cached GeForce NOW library data.
 - Uses the GeForce NOW catalog API to resolve launch-route metadata (`cmsId`, `shortName`, `parentGameId`, store variant ids).
 - Launches through the GeForce NOW Flatpak entrypoint with `--url-route`:
   - `flatpak run --command=/app/cef/GeForceNOW com.nvidia.geforcenow '--url-route=#?cmsId=...&launchSource=External&shortName=...&parentGameId=...'`
 - Supports linked store variants present in your GFN library (Steam, Epic, Xbox/Game Pass, Ubisoft Connect, EA App, and other stores exposed by GFN variants).
+- GeForce NOW count differences:
+  - The GeForce NOW client count is the number of app cards in your library.
+  - Klay imports store-linked variants as separate entries when GFN exposes multiple owned stores for the same title, so Klay can show a higher count than the GeForce NOW app.
+  - Steam fallback can also add supported Steam titles beyond what appears in the cached GeForce NOW library.
 - Persists store metadata on imported games so details can show source + store (text and logo when a logo asset exists).
 - Re-import does not create duplicate entries for existing IDs; it refreshes launch/store metadata when values change.
 - Installed Steam titles are still considered.
@@ -261,10 +276,12 @@ Klay uses its own namespace:
 
 - Confirm `GeForce NOW` source is enabled in `Preferences -> Sources`.
 - Confirm `com.nvidia.geforcenow` Flatpak is installed.
-- Launch GeForce NOW once and open `Library` so local cache data is populated.
+- Launch GeForce NOW once and open `Library` so both preview and full-library cache data are populated.
+- If you still only see a small subset of your library, confirm the Python runtime used by Klay can import `brotli`, then re-run import.
 - For non-Steam titles, make sure the platform account is connected in GeForce NOW and the game appears in your GFN `Library`.
 - Ensure Steam has logged in at least once on this machine so local ownership data exists under `userdata/*/config/localconfig.vdf`.
 - If local ownership data is missing, Klay falls back to Steam profile lookup.
+- If Klay shows more entries than the GeForce NOW client, that is usually expected because Klay imports owned store variants separately and may supplement with Steam ownership data.
 - If import reports duplicates for GFN games, that is expected for already-imported entries; Klay still refreshes metadata such as store/source/executable.
 
 ### GeForce NOW auto-close not working
