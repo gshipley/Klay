@@ -37,6 +37,9 @@ LANCZOS = getattr(getattr(Image, "Resampling", Image), "LANCZOS") if Image else 
 REQUEST_TIMEOUT_SECONDS = 4
 DOWNLOAD_TIMEOUT_SECONDS = 8
 SGDB_MAX_CONSECUTIVE_NETWORK_ERRORS = 4
+GFN_KEY_ART_SQUARE_FILL_MIGRATION_STATE_KEY = (
+    "geforcenow-key-art-square-fill-migration-done"
+)
 
 
 def _emit_progress(**payload: Any) -> None:
@@ -158,7 +161,12 @@ def _load_source_classes(errors: list[str]) -> list[type]:
     return source_classes
 
 
-def _compose_cover(image: Image.Image, icon_mode: bool = False) -> Image.Image:
+def _compose_cover(
+    image: Image.Image,
+    icon_mode: bool = False,
+    *,
+    fill_square: bool = False,
+) -> Image.Image:
     if ImageOps is None or ImageFilter is None or LANCZOS is None:
         raise RuntimeError("Pillow is required for cover processing.")
 
@@ -166,6 +174,12 @@ def _compose_cover(image: Image.Image, icon_mode: bool = False) -> Image.Image:
     target_w, target_h = COVER_SIZE
     aspect = image.width / max(image.height, 1)
     target_aspect = target_w / target_h
+    squareish = 0.88 <= aspect <= 1.12
+
+    if fill_square and not icon_mode and squareish:
+        return ImageOps.fit(image.convert("RGB"), COVER_SIZE, method=LANCZOS).convert(
+            "RGB"
+        )
 
     if icon_mode or aspect > target_aspect * 1.12:
         background = ImageOps.fit(
@@ -202,6 +216,7 @@ def _save_cover_from_path(
     covers_dir: Path,
     game_id: str,
     icon_mode: bool = False,
+    fill_square: bool = False,
 ) -> bool:
     def _save_with_pillow(path: Path) -> bool:
         if Image is None or ImageSequence is None:
@@ -214,7 +229,13 @@ def _save_cover_from_path(
                     frames: list[Image.Image] = []
                     durations: list[int] = []
                     for frame in ImageSequence.Iterator(image):
-                        frames.append(_compose_cover(frame.convert("RGBA"), icon_mode=False))
+                        frames.append(
+                            _compose_cover(
+                                frame.convert("RGBA"),
+                                icon_mode=False,
+                                fill_square=fill_square,
+                            )
+                        )
                         durations.append(int(frame.info.get("duration", 100)))
                     if not frames:
                         return False
@@ -227,7 +248,11 @@ def _save_cover_from_path(
                     )
                     return True
 
-                still = _compose_cover(image, icon_mode=icon_mode)
+                still = _compose_cover(
+                    image,
+                    icon_mode=icon_mode,
+                    fill_square=fill_square,
+                )
                 still.save(target.with_suffix(".png"), format="PNG", optimize=True)
                 return True
         except Exception:  # pylint: disable=broad-exception-caught
@@ -1022,6 +1047,7 @@ def _attempt_cover_update(
         return False, had_cover_before
 
     cover_updated = False
+    fill_square_cover = bool(additional_data.get("square_fill_cover"))
     use_sgdb = allow_network_enrichment and settings.get_bool("sgdb", False)
     use_igdb = allow_network_enrichment and settings.get_bool("igdb", False)
     prefer_sgdb = settings.get_bool("sgdb-prefer", False)
@@ -1047,6 +1073,7 @@ def _attempt_cover_update(
             covers_dir=covers_dir,
             game_id=game_id,
             icon_mode=False,
+            fill_square=fill_square_cover,
         )
     elif path := additional_data.get("local_icon_path"):
         cover_updated = _save_cover_from_path(
@@ -1054,6 +1081,7 @@ def _attempt_cover_update(
             covers_dir=covers_dir,
             game_id=game_id,
             icon_mode=True,
+            fill_square=False,
         )
     elif allow_network_enrichment and (url := additional_data.get("online_cover_url")):
         if tmp_file := _download_to_temp(str(url)):
@@ -1063,6 +1091,7 @@ def _attempt_cover_update(
                     covers_dir=covers_dir,
                     game_id=game_id,
                     icon_mode=False,
+                    fill_square=fill_square_cover,
                 )
             finally:
                 tmp_file.unlink(missing_ok=True)
@@ -1089,6 +1118,7 @@ def _attempt_cover_update(
                     covers_dir=covers_dir,
                     game_id=game_id,
                     icon_mode=False,
+                    fill_square=False,
                 )
             finally:
                 tmp_file.unlink(missing_ok=True)
@@ -1115,6 +1145,7 @@ def _attempt_cover_update(
                     covers_dir=covers_dir,
                     game_id=game_id,
                     icon_mode=False,
+                    fill_square=False,
                 )
             finally:
                 tmp_file.unlink(missing_ok=True)
@@ -1412,6 +1443,10 @@ def _run_import() -> dict[str, Any]:
     seen_ids: set[str] = set()
     scanned_ids: set[str] = set()
     emit_start_done = False
+    gfn_cover_migration_pending = not settings.get_state_bool(
+        GFN_KEY_ART_SQUARE_FILL_MIGRATION_STATE_KEY,
+        False,
+    )
 
     for source_class in source_classes:
         if not emit_start_done:
@@ -1454,6 +1489,7 @@ def _run_import() -> dict[str, Any]:
             cover_updates=summary.cover_updates,
             errors=len(errors),
         )
+        gfn_cover_migration_seen = False
         try:
             source_iter = iter(source)
         except Exception as error:  # pylint: disable=broad-exception-caught
@@ -1492,6 +1528,16 @@ def _run_import() -> dict[str, Any]:
                 summary.duplicates += 1
                 continue
             scanned_ids.add(game_id)
+
+            force_gfn_cover_migration = (
+                gfn_cover_migration_pending
+                and source_id == "geforcenow"
+                and bool(additional_data.get("gfn_library"))
+                and bool(additional_data.get("square_fill_cover"))
+                and bool(str(additional_data.get("online_cover_url") or "").strip())
+            )
+            if force_gfn_cover_migration:
+                gfn_cover_migration_seen = True
 
             existing = existing_games.get(game_id)
             if existing and not existing.get("removed", False):
@@ -1547,7 +1593,7 @@ def _run_import() -> dict[str, Any]:
                     igdb_cover_cache=igdb_cover_cache,
                     errors=errors,
                     allow_network_enrichment=not fast_mode,
-                    preserve_existing_cover=True,
+                    preserve_existing_cover=not force_gfn_cover_migration,
                 )
 
                 if cover_updated:
@@ -1656,6 +1702,10 @@ def _run_import() -> dict[str, Any]:
                 errors=len(errors),
                 cover_updated=cover_updated,
             )
+
+        if gfn_cover_migration_pending and source_id == "geforcenow" and gfn_cover_migration_seen:
+            settings.set_state_bool(GFN_KEY_ART_SQUARE_FILL_MIGRATION_STATE_KEY, True)
+            gfn_cover_migration_pending = False
 
     if settings.get_bool("remove-missing", True):
         for game_id, data in existing_games.items():

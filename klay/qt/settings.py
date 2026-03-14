@@ -62,7 +62,11 @@ STRING_KEYS = {
     "igdb-key": "",
 }
 
-STATE_BOOL_KEYS = {"show-sidebar": False}
+STATE_BOOL_KEYS = {
+    "show-sidebar": False,
+    "geforcenow-key-art-cover-migration-done": False,
+    "geforcenow-key-art-square-fill-migration-done": False,
+}
 STATE_STRING_KEYS = {"sort-mode": "last_played"}
 
 

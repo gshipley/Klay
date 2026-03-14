@@ -142,6 +142,10 @@ GeForce NOW notes:
   - Klay prefers cached `requestType=apps` GeForce NOW responses from the Chromium HTTP cache because those correspond to the full owned-library view and include pagination.
   - If those responses are missing or cannot be decoded, Klay falls back to the smaller `panels/Library` preview data from the service-worker cache.
   - Steam ownership data can still supplement supported Steam titles that are not already present in the cached GeForce NOW library data.
+- Cover behavior:
+  - Klay prefers GeForce NOW catalog `KEY_ART` when available instead of wide hero/banner art.
+  - Square GeForce NOW `KEY_ART` is cropped to fill the portrait card instead of being shown as centered art on a blurred background.
+  - After upgrading, the next GeForce NOW import rewrites existing GFN square-`KEY_ART` covers once in bulk so older blurred-background cards are replaced automatically.
 - Uses the GeForce NOW catalog API to resolve launch-route metadata (`cmsId`, `shortName`, `parentGameId`, store variant ids).
 - Launches through the GeForce NOW Flatpak entrypoint with `--url-route`:
   - `flatpak run --command=/app/cef/GeForceNOW com.nvidia.geforcenow '--url-route=#?cmsId=...&launchSource=External&shortName=...&parentGameId=...'`
@@ -277,6 +281,7 @@ Klay uses its own namespace:
 - Confirm `GeForce NOW` source is enabled in `Preferences -> Sources`.
 - Confirm `com.nvidia.geforcenow` Flatpak is installed.
 - Launch GeForce NOW once and open `Library` so both preview and full-library cache data are populated.
+- Run one normal import after upgrading so the one-time GeForce NOW cover migration can replace older blurred-background `KEY_ART` covers.
 - If you still only see a small subset of your library, confirm the Python runtime used by Klay can import `brotli`, then re-run import.
 - For non-Steam titles, make sure the platform account is connected in GeForce NOW and the game appears in your GFN `Library`.
 - Ensure Steam has logged in at least once on this machine so local ownership data exists under `userdata/*/config/localconfig.vdf`.
