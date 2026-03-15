@@ -84,6 +84,8 @@ ROLE_PLAYTIME = Qt.ItemDataRole.UserRole + 7
 COVER_SIZE = QSize(200, 300)
 DETAILS_BADGE_LABEL_SIZE = QSize(108, 108)
 DETAILS_BADGE_ICON_SIZE = QSize(108, 108)
+IMPORT_PROGRESS_HISTORY_LIMIT = 300
+LAUNCH_FEEDBACK_TIMEOUT_MS = 10_000
 CATEGORY_FILTER_PREFIX = "category:"
 ALL_GAMES_EXCLUDED_SOURCES_DEFAULT = frozenset({"geforcenow"})
 GEFORCENOW_STATE_SUBPATH = Path(
@@ -1036,6 +1038,8 @@ class KlayMainWindow(QMainWindow):
         self.details_cover_movie: QMovie | None = None
         self.import_thread: ImportWorkerThread | None = None
         self.import_progress_dialog: WorkerProgressDialog | None = None
+        self.launch_feedback_dialog: QDialog | None = None
+        self.launch_feedback_timer: QTimer | None = None
         self.last_import_session: ImportSession | None = None
         self._close_after_import_cancel = False
         self._geforcenow_process: subprocess.Popen[Any] | None = None
@@ -1046,8 +1050,13 @@ class KlayMainWindow(QMainWindow):
         self._geforcenow_stream_started = False
         self._geforcenow_stream_started_at = 0.0
         self._geforcenow_monitor_started_at = 0.0
+        self._launch_feedback_waiting_for_geforcenow = False
         self.import_status_label: QLabel | None = None
         self.import_status_progress_bar: QProgressBar | None = None
+        self._import_progress_auto = False
+        self._import_progress_title = ""
+        self._import_progress_message = ""
+        self._import_progress_history: list[dict[str, Any]] = []
 
         self.setWindowTitle("Klay")
         icon = _app_icon()
@@ -1122,6 +1131,8 @@ class KlayMainWindow(QMainWindow):
         self.import_status_progress_bar.setFixedWidth(220)
         self.import_status_progress_bar.setTextVisible(False)
         self.import_status_progress_bar.setVisible(False)
+        self.import_status_label.installEventFilter(self)
+        self.import_status_progress_bar.installEventFilter(self)
         status_bar.addPermanentWidget(self.import_status_label)
         status_bar.addPermanentWidget(self.import_status_progress_bar)
         status_bar.showMessage("Ready")
@@ -1401,7 +1412,7 @@ class KlayMainWindow(QMainWindow):
 
         button_row = QHBoxLayout()
         self.details_play_btn = QPushButton("Play")
-        self.details_play_btn.clicked.connect(self.launch_active_game)
+        self.details_play_btn.clicked.connect(self.launch_active_game_from_details)
         button_row.addWidget(self.details_play_btn)
 
         self.details_edit_btn = QToolButton()
@@ -1759,6 +1770,12 @@ class KlayMainWindow(QMainWindow):
 
                 self.show_library_page()
                 return True
+        elif watched in (self.import_status_label, self.import_status_progress_bar):
+            if event.type() == QEvent.Type.MouseButtonPress:
+                if hasattr(event, "button") and event.button() != Qt.MouseButton.LeftButton:  # type: ignore[attr-defined]
+                    return super().eventFilter(watched, event)
+                if self._show_import_progress_details():
+                    return True
         return super().eventFilter(watched, event)
 
     def _load_category_icon_paths(self) -> dict[str, str]:
@@ -2924,6 +2941,57 @@ class KlayMainWindow(QMainWindow):
         self._geforcenow_stream_started_at = 0.0
         self._geforcenow_monitor_started_at = 0.0
 
+    def _scan_geforcenow_logs_for_stream_events(self) -> tuple[bool, bool]:
+        stream_started = False
+        for path in self._geforcenow_log_files:
+            try:
+                current_size = path.stat().st_size
+            except OSError:
+                continue
+
+            previous_size = self._geforcenow_log_offsets.get(path, 0)
+            if current_size < previous_size:
+                previous_size = 0
+            if current_size == previous_size:
+                continue
+
+            try:
+                with path.open("r", encoding="utf-8", errors="ignore") as open_file:
+                    open_file.seek(previous_size)
+                    chunk = open_file.read()
+            except OSError:
+                self._geforcenow_log_offsets[path] = current_size
+                continue
+
+            self._geforcenow_log_offsets[path] = current_size
+            if not chunk:
+                continue
+            lower_chunk = chunk.casefold()
+            for line in lower_chunk.splitlines():
+                if any(marker in line for marker in GEFORCENOW_STREAM_START_MARKERS):
+                    if not self._geforcenow_stream_started:
+                        self._geforcenow_stream_started = True
+                        self._geforcenow_stream_started_at = time.monotonic()
+                        stream_started = True
+
+                stream_started_ready = (
+                    self._geforcenow_stream_started
+                    and self._geforcenow_stream_started_at > 0
+                    and (
+                        time.monotonic() - self._geforcenow_stream_started_at
+                    )
+                    >= GEFORCENOW_STREAM_END_MIN_SECONDS
+                )
+                stream_end_armed = stream_started_ready or (
+                    self._geforcenow_monitor_started_at > 0
+                    and (time.monotonic() - self._geforcenow_monitor_started_at) >= 25
+                )
+                if stream_end_armed and any(
+                    marker in line for marker in GEFORCENOW_STREAM_END_MARKERS
+                ):
+                    return stream_started, True
+        return stream_started, False
+
     def _force_kill_geforcenow_process(self, process: subprocess.Popen[Any]) -> None:
         if process.poll() is not None:
             return
@@ -2974,91 +3042,110 @@ class KlayMainWindow(QMainWindow):
             self.statusBar().showMessage("GeForce NOW stream ended")
         self._stop_geforcenow_autoclose_monitor()
 
-    def _scan_geforcenow_logs_for_stream_end(self) -> bool:
-        for path in self._geforcenow_log_files:
-            try:
-                current_size = path.stat().st_size
-            except OSError:
-                continue
-
-            previous_size = self._geforcenow_log_offsets.get(path, 0)
-            if current_size < previous_size:
-                previous_size = 0
-            if current_size == previous_size:
-                continue
-
-            try:
-                with path.open("r", encoding="utf-8", errors="ignore") as open_file:
-                    open_file.seek(previous_size)
-                    chunk = open_file.read()
-            except OSError:
-                self._geforcenow_log_offsets[path] = current_size
-                continue
-
-            self._geforcenow_log_offsets[path] = current_size
-            if not chunk:
-                continue
-            lower_chunk = chunk.casefold()
-            for line in lower_chunk.splitlines():
-                if any(marker in line for marker in GEFORCENOW_STREAM_START_MARKERS):
-                    if not self._geforcenow_stream_started:
-                        self._geforcenow_stream_started = True
-                        self._geforcenow_stream_started_at = time.monotonic()
-
-                stream_started_ready = (
-                    self._geforcenow_stream_started
-                    and self._geforcenow_stream_started_at > 0
-                    and (
-                        time.monotonic() - self._geforcenow_stream_started_at
-                    )
-                    >= GEFORCENOW_STREAM_END_MIN_SECONDS
-                )
-                stream_end_armed = stream_started_ready or (
-                    self._geforcenow_monitor_started_at > 0
-                    and (time.monotonic() - self._geforcenow_monitor_started_at) >= 25
-                )
-                if stream_end_armed and any(
-                    marker in line for marker in GEFORCENOW_STREAM_END_MARKERS
-                ):
-                    return True
-        return False
-
     def _poll_geforcenow_stream_end(self) -> None:
-        if not self._geforcenow_autoclose_enabled():
-            self._stop_geforcenow_autoclose_monitor()
-            return
+        should_autoclose = self._geforcenow_autoclose_enabled()
 
         self._refresh_geforcenow_log_files(initialize_new_offsets=False)
-        if self._scan_geforcenow_logs_for_stream_end():
-            self._terminate_geforcenow_session()
+        stream_started, stream_ended = self._scan_geforcenow_logs_for_stream_events()
+
+        if stream_started and self._launch_feedback_waiting_for_geforcenow:
+            self._close_launch_feedback()
+
+        if stream_ended:
+            if should_autoclose:
+                self._terminate_geforcenow_session()
+            else:
+                self._stop_geforcenow_autoclose_monitor()
             return
 
         process = self._geforcenow_process
         process_alive = process is not None and process.poll() is None
         if process_alive or self._is_geforcenow_running():
             self._geforcenow_idle_polls = 0
+            if not should_autoclose and self._geforcenow_stream_started:
+                self._stop_geforcenow_autoclose_monitor()
             return
 
+        if self._launch_feedback_waiting_for_geforcenow:
+            self._close_launch_feedback()
         self._geforcenow_idle_polls += 1
-        if self._geforcenow_idle_polls >= 10:
+        if self._geforcenow_idle_polls >= 10 or not should_autoclose:
             self._stop_geforcenow_autoclose_monitor()
 
-    def launch_game(self, game: GameEntry) -> None:
+    def _close_launch_feedback(self) -> None:
+        if self.launch_feedback_timer is not None:
+            self.launch_feedback_timer.stop()
+            self.launch_feedback_timer.deleteLater()
+            self.launch_feedback_timer = None
+        self._launch_feedback_waiting_for_geforcenow = False
+        dialog = self.launch_feedback_dialog
+        self.launch_feedback_dialog = None
+        if dialog is not None:
+            dialog.close()
+            dialog.deleteLater()
+        self.details_play_btn.setEnabled(True)
+
+    def _schedule_launch_feedback_close(self, timeout_ms: int) -> None:
+        if self.launch_feedback_timer is not None:
+            self.launch_feedback_timer.stop()
+            self.launch_feedback_timer.deleteLater()
+
+        self.launch_feedback_timer = QTimer(self)
+        self.launch_feedback_timer.setSingleShot(True)
+        self.launch_feedback_timer.timeout.connect(self._close_launch_feedback)
+        self.launch_feedback_timer.start(max(0, timeout_ms))
+
+    def _show_launch_feedback(self, game_name: str) -> None:
+        self._close_launch_feedback()
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Launching")
+        dialog.setModal(False)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dialog.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
+        dialog.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
+        dialog.setMinimumWidth(320)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        label = QLabel(f"Launching {game_name}…")
+        label.setWordWrap(True)
+        layout.addWidget(label)
+
+        progress_bar = QProgressBar()
+        progress_bar.setRange(0, 0)
+        layout.addWidget(progress_bar)
+
+        dialog.adjustSize()
+        parent_rect = self.frameGeometry()
+        dialog_rect = dialog.frameGeometry()
+        dialog.move(parent_rect.center() - dialog_rect.center())
+        dialog.show()
+        QApplication.processEvents()
+        self.launch_feedback_dialog = dialog
+
+    def launch_game(self, game: GameEntry) -> bool:
         try:
             process = self.library.launch(game)
         except OSError as error:
+            self._close_launch_feedback()
             self._show_error("Launch Failed", str(error))
-            return
+            return False
 
-        if game.base_source == "geforcenow" and self._geforcenow_autoclose_enabled():
+        if game.base_source == "geforcenow" and (
+            self._geforcenow_autoclose_enabled() or self.launch_feedback_dialog is not None
+        ):
             self._start_geforcenow_autoclose_monitor(process)
         self.statusBar().showMessage(f"Launched {game.name}")
         if self.runtime_settings.get_bool(
             "exit-after-launch", GENERAL_BOOL_KEYS["exit-after-launch"]
         ):
             self.close()
-            return
+            return True
         self.reload_games()
+        return True
 
     def _push_undo(self, game: GameEntry, field: str, previous: bool) -> None:
         self.undo_stack.append(UndoEntry(game_id=game.game_id, field=field, previous=previous))
@@ -3356,6 +3443,22 @@ class KlayMainWindow(QMainWindow):
             return
         self.launch_game(game)
 
+    def launch_active_game_from_details(self) -> None:
+        game = self.active_game()
+        if game is None or not self.details_play_btn.isEnabled():
+            return
+
+        self.details_play_btn.setEnabled(False)
+        self._show_launch_feedback(game.name)
+        launched = self.launch_game(game)
+        if launched:
+            if game.base_source == "geforcenow":
+                self._launch_feedback_waiting_for_geforcenow = True
+            else:
+                self._schedule_launch_feedback_close(LAUNCH_FEEDBACK_TIMEOUT_MS)
+        else:
+            self._close_launch_feedback()
+
     def toggle_hide_active_game(self) -> None:
         game = self.active_game()
         if game is None:
@@ -3373,6 +3476,68 @@ class KlayMainWindow(QMainWindow):
         self.add_game_action.setEnabled(not importing)
         self.empty_import_button.setEnabled(not importing)
 
+    def _set_import_status_details_enabled(self, enabled: bool) -> None:
+        tooltip = "Click for import details" if enabled else ""
+        cursor = (
+            Qt.CursorShape.PointingHandCursor
+            if enabled
+            else Qt.CursorShape.ArrowCursor
+        )
+        for widget in (self.import_status_label, self.import_status_progress_bar):
+            if widget is None:
+                continue
+            widget.setToolTip(tooltip)
+            widget.setCursor(cursor)
+
+    def _reset_import_progress_state(self) -> None:
+        self._import_progress_auto = False
+        self._import_progress_title = ""
+        self._import_progress_message = ""
+        self._import_progress_history.clear()
+
+    def _record_import_progress(self, payload: dict[str, Any]) -> None:
+        self._import_progress_history.append(dict(payload))
+        overflow = len(self._import_progress_history) - IMPORT_PROGRESS_HISTORY_LIMIT
+        if overflow > 0:
+            del self._import_progress_history[:overflow]
+
+    def _ensure_import_progress_dialog(self, *, modal: bool) -> WorkerProgressDialog:
+        dialog = self.import_progress_dialog
+        if dialog is None:
+            dialog = WorkerProgressDialog(
+                title=self._import_progress_title or "Import",
+                message=self._import_progress_message or "Working…",
+                parent=self,
+            )
+            dialog.cancel_requested.connect(self._cancel_import)
+            self.import_progress_dialog = dialog
+            for payload in self._import_progress_history:
+                dialog.update_stats(payload)
+        else:
+            dialog.set_summary_message(self._import_progress_message or "Working…")
+
+        dialog.cancel_button.setEnabled(
+            self._import_progress_message != "Canceling import..."
+        )
+        dialog.setModal(modal)
+        dialog.setWindowModality(
+            Qt.WindowModality.WindowModal
+            if modal
+            else Qt.WindowModality.NonModal
+        )
+        dialog.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, not modal)
+        dialog.show()
+        return dialog
+
+    def _show_import_progress_details(self) -> bool:
+        if self.import_thread is None or not self.import_thread.isRunning():
+            return False
+
+        dialog = self._ensure_import_progress_dialog(modal=not self._import_progress_auto)
+        dialog.raise_()
+        dialog.activateWindow()
+        return True
+
     def _show_import_status_progress(self, *, mode: str) -> None:
         if self.import_status_label is None or self.import_status_progress_bar is None:
             return
@@ -3382,6 +3547,7 @@ class KlayMainWindow(QMainWindow):
         self.import_status_progress_bar.setRange(0, 0)
         self.import_status_progress_bar.setValue(0)
         self.import_status_progress_bar.setVisible(True)
+        self._set_import_status_details_enabled(True)
 
     def _update_import_status_progress(self, payload: dict[str, Any]) -> None:
         if self.import_status_progress_bar is None or not self.import_status_progress_bar.isVisible():
@@ -3402,6 +3568,7 @@ class KlayMainWindow(QMainWindow):
             self.import_status_progress_bar.setVisible(False)
             self.import_status_progress_bar.setRange(0, 0)
             self.import_status_progress_bar.setValue(0)
+        self._set_import_status_details_enabled(False)
 
     def _close_import_progress(self) -> None:
         if self.import_progress_dialog is None:
@@ -3421,6 +3588,7 @@ class KlayMainWindow(QMainWindow):
             return
 
         self._close_after_import_cancel = self._close_after_import_cancel or close_after
+        self._import_progress_message = "Canceling import..."
         if self.import_progress_dialog is not None:
             self.import_progress_dialog.set_summary_message("Canceling import...")
             self.import_progress_dialog.cancel_button.setEnabled(False)
@@ -3428,6 +3596,7 @@ class KlayMainWindow(QMainWindow):
         self.import_thread.stop()
 
     def _on_import_thread_progress(self, payload: dict[str, Any], mode: str) -> None:
+        self._record_import_progress(payload)
         if self.import_progress_dialog is not None:
             self.import_progress_dialog.update_stats(payload)
         self._update_import_status_progress(payload)
@@ -3603,6 +3772,7 @@ class KlayMainWindow(QMainWindow):
         self._set_import_in_progress(False)
         self._close_import_progress()
         self._hide_import_status_progress()
+        self._reset_import_progress_state()
         if self.import_thread is not None:
             self.import_thread.deleteLater()
         self.import_thread = None
@@ -3616,6 +3786,7 @@ class KlayMainWindow(QMainWindow):
             return
 
         self._set_import_in_progress(True)
+        self._reset_import_progress_state()
         self._show_import_status_progress(mode=mode)
         include_cover_refresh = self.runtime_settings.get_bool(
             "refresh-covers-on-metadata", False
@@ -3630,18 +3801,14 @@ class KlayMainWindow(QMainWindow):
             else "Importing games…"
         )
         progress_title = "Refresh Metadata" if mode == "refresh_metadata" else "Import"
+        self._import_progress_auto = auto
+        self._import_progress_title = progress_title
+        self._import_progress_message = progress_text
         if auto:
             self.import_progress_dialog = None
             self.statusBar().showMessage(progress_text)
         else:
-            self.import_progress_dialog = WorkerProgressDialog(
-                title=progress_title,
-                message=progress_text,
-                parent=self,
-            )
-            self.import_progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
-            self.import_progress_dialog.cancel_requested.connect(self._cancel_import)
-            self.import_progress_dialog.show()
+            self._ensure_import_progress_dialog(modal=True)
 
         # Always run full enrichment so first imports include metadata and covers.
         fast_mode = False
