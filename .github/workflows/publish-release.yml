@@ -46,6 +46,12 @@ jobs:
       - name: Create release notes
         run: |
           tag="${{ steps.version.outputs.tag_name }}"
+          release_doc="docs/releases/${tag}.md"
+          if [ -f "${release_doc}" ]; then
+            cp "${release_doc}" release_notes
+            exit 0
+          fi
+
           previous_tag="$(
             git tag --list 'v*' --sort=-version:refname \
               | grep -Fxv "${tag}" \
