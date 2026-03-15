@@ -12,6 +12,10 @@ Klay is that project.
 
 It is heavily inspired by [Cartridges](https://github.com/kra-mo/cartridges) for GNOME, but built around a Qt/KDE workflow.
 
+## AI Assistance
+
+Klay is developed by me, and I also use AI tooling, including Codex, to help with some code, refactoring, debugging, and documentation work. All changes are still reviewed, tested, and curated by me before they are released.
+
 ## Why I Built Klay
 
 - I wanted one place for all my games on Linux.
