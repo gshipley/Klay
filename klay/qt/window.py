@@ -505,12 +505,19 @@ def _preferred_store_for_card_badge(game: GameEntry) -> str:
     return ""
 
 
-def _game_card_badge_pixmap(game: GameEntry) -> QPixmap:
-    store_icon = _store_logo_icon(_preferred_store_for_card_badge(game))
+@lru_cache(maxsize=128)
+def _cached_game_card_badge_pixmap(base_source: str, store_slug: str) -> QPixmap:
+    store_icon = _store_logo_icon(store_slug)
     badge = _card_badge_pixmap(store_icon)
     if not badge.isNull():
         return badge
-    return _card_badge_pixmap(_source_icon(game.base_source))
+    return _card_badge_pixmap(_source_icon(base_source))
+
+
+def _game_card_badge_pixmap(game: GameEntry) -> QPixmap:
+    base_source = game.base_source.strip().lower()
+    store_slug = _store_logo_slug(_preferred_store_for_card_badge(game))
+    return _cached_game_card_badge_pixmap(base_source, store_slug)
 
 
 def _link_html(url: str, *, color: str = "#8fd2ff") -> str:
