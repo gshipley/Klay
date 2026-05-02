@@ -80,10 +80,12 @@ ROLE_COVER_PIXMAP = Qt.ItemDataRole.UserRole + 4
 ROLE_SIDEBAR_COUNT = Qt.ItemDataRole.UserRole + 5
 ROLE_SIDEBAR_HEADING = Qt.ItemDataRole.UserRole + 6
 ROLE_PLAYTIME = Qt.ItemDataRole.UserRole + 7
+ROLE_SOURCE_BADGE_PIXMAP = Qt.ItemDataRole.UserRole + 8
 
 COVER_SIZE = QSize(200, 300)
 DETAILS_BADGE_LABEL_SIZE = QSize(108, 108)
 DETAILS_BADGE_ICON_SIZE = QSize(108, 108)
+CARD_BADGE_ICON_SIZE = QSize(56, 34)
 IMPORT_PROGRESS_HISTORY_LIMIT = 300
 LAUNCH_FEEDBACK_TIMEOUT_MS = 10_000
 CATEGORY_FILTER_PREFIX = "category:"
@@ -471,6 +473,46 @@ def _details_badge_pixmap(icon: QIcon) -> QPixmap:
     )
 
 
+def _card_badge_pixmap(icon: QIcon) -> QPixmap:
+    if icon.isNull():
+        return QPixmap()
+    raw = icon.pixmap(QSize(160, 160))
+    if raw.isNull():
+        return raw
+    trimmed = _trim_transparent_edges(raw)
+    return trimmed.scaled(
+        CARD_BADGE_ICON_SIZE,
+        Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+
+
+def _preferred_store_for_card_badge(game: GameEntry) -> str:
+    store = game.store or _infer_geforcenow_store(game)
+    if store:
+        return store
+
+    source = game.source.strip().lower()
+    base_source = game.base_source
+    if base_source == "steam":
+        return "steam"
+    if base_source == "heroic" and "_" in source:
+        return source.split("_", 1)[1]
+    if base_source == "legendary":
+        return "epic"
+    if base_source == "itch":
+        return "itch"
+    return ""
+
+
+def _game_card_badge_pixmap(game: GameEntry) -> QPixmap:
+    store_icon = _store_logo_icon(_preferred_store_for_card_badge(game))
+    badge = _card_badge_pixmap(store_icon)
+    if not badge.isNull():
+        return badge
+    return _card_badge_pixmap(_source_icon(game.base_source))
+
+
 def _link_html(url: str, *, color: str = "#8fd2ff") -> str:
     safe = escape(url.strip(), quote=True)
     if not safe:
@@ -487,6 +529,10 @@ class GameCardDelegate(QStyledItemDelegate):
     INNER_BORDER = 1
     TEXT_PAD_H = 11
     TEXT_PAD_V = 8
+    BADGE_SLOT_W = 66
+    BADGE_SLOT_H = 42
+    BADGE_GAP = 8
+    BADGE_CORNER_INSET = 6
     BASE_CARD_WIDTH = 216
     BASE_COVER_HEIGHT = 300
     MIN_CARD_HEIGHT = 368
@@ -514,6 +560,8 @@ class GameCardDelegate(QStyledItemDelegate):
     ) -> tuple[int, int]:
         title = str(index.data(ROLE_TITLE) or "")
         playtime = str(index.data(ROLE_PLAYTIME) or "").strip()
+        badge = index.data(ROLE_SOURCE_BADGE_PIXMAP)
+        has_badge = isinstance(badge, QPixmap) and not badge.isNull()
         metrics = option.fontMetrics
         title_bounds = metrics.boundingRect(
             QRect(0, 0, max(1, text_width), 10_000),
@@ -526,12 +574,28 @@ class GameCardDelegate(QStyledItemDelegate):
         if playtime:
             meta_height = QFontMetrics(self._meta_font(option.font)).height()
 
-        gap = max(4, metrics.lineSpacing() // 5) if meta_height else 0
+        footer_height = max(meta_height, self.BADGE_SLOT_H if has_badge else 0)
+        gap = max(4, metrics.lineSpacing() // 5) if footer_height else 0
         panel_height = max(
             self.MIN_TITLE_PANEL_HEIGHT,
-            self.TEXT_PAD_V * 2 + title_height + gap + meta_height,
+            self.TEXT_PAD_V * 2 + title_height + gap + footer_height,
         )
         return panel_height, meta_height
+
+    def _draw_badge(
+        self,
+        painter: QPainter,
+        *,
+        badge: QPixmap,
+        slot_rect: QRect,
+    ) -> None:
+        badge_rect = QRect(
+            slot_rect.right() - badge.width() + 1,
+            slot_rect.bottom() - badge.height() + 1,
+            badge.width(),
+            badge.height(),
+        )
+        painter.drawPixmap(badge_rect, badge)
 
     def sizeHint(self, option: QStyleOptionViewItem, index) -> QSize:
         inner_width = (
@@ -645,15 +709,21 @@ class GameCardDelegate(QStyledItemDelegate):
         )
         title_text = str(index.data(ROLE_TITLE) or "")
         playtime_text = str(index.data(ROLE_PLAYTIME) or "")
-        if playtime_text:
+        badge = index.data(ROLE_SOURCE_BADGE_PIXMAP)
+        has_badge = isinstance(badge, QPixmap) and not badge.isNull()
+        if playtime_text or has_badge:
             meta_font = self._meta_font(option.font)
             meta_metrics = QFontMetrics(meta_font)
+            footer_height = max(
+                meta_metrics.height() if playtime_text else 0,
+                self.BADGE_SLOT_H if has_badge else 0,
+            )
             gap = max(4, option.fontMetrics.lineSpacing() // 5)
             title_text_rect = QRect(
                 text_rect.left(),
                 text_rect.top(),
                 text_rect.width(),
-                max(0, text_rect.height() - meta_metrics.height() - gap),
+                max(0, text_rect.height() - footer_height - gap),
             )
             painter.setPen(title_color)
             painter.drawText(
@@ -661,20 +731,46 @@ class GameCardDelegate(QStyledItemDelegate):
                 Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft | Qt.TextFlag.TextWordWrap,
                 title_text,
             )
-            painter.setFont(meta_font)
-            painter.setPen(meta_color)
-            playtime_rect = QRect(
+            footer_rect = QRect(
                 text_rect.left(),
-                text_rect.bottom() - meta_metrics.height() + 1,
+                text_rect.bottom() - footer_height + 1,
                 text_rect.width(),
-                meta_metrics.height(),
+                footer_height,
             )
-            painter.drawText(
-                playtime_rect,
-                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                playtime_text,
-            )
-            painter.setFont(option.font)
+            if playtime_text:
+                meta_width = footer_rect.width()
+                if has_badge:
+                    meta_width = max(0, meta_width - self.BADGE_SLOT_W - self.BADGE_GAP)
+                painter.setFont(meta_font)
+                painter.setPen(meta_color)
+                playtime_rect = QRect(
+                    footer_rect.left(),
+                    footer_rect.top(),
+                    meta_width,
+                    footer_rect.height(),
+                )
+                painter.drawText(
+                    playtime_rect,
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                    meta_metrics.elidedText(
+                        playtime_text,
+                        Qt.TextElideMode.ElideRight,
+                        max(0, meta_width),
+                    ),
+                )
+                painter.setFont(option.font)
+            if has_badge:
+                badge_anchor_rect = title_rect.adjusted(
+                    0,
+                    0,
+                    -self.BADGE_CORNER_INSET,
+                    -self.BADGE_CORNER_INSET,
+                )
+                self._draw_badge(
+                    painter,
+                    badge=badge,
+                    slot_rect=badge_anchor_rect,
+                )
         else:
             painter.setPen(title_color)
             painter.drawText(
@@ -2305,6 +2401,7 @@ class KlayMainWindow(QMainWindow):
             item.setData(ROLE_TITLE, game.name)
             item.setData(ROLE_COVER_PIXMAP, self._game_cover(game))
             item.setData(ROLE_PLAYTIME, _fmt_playtime_minutes(game.playtime_minutes))
+            item.setData(ROLE_SOURCE_BADGE_PIXMAP, _game_card_badge_pixmap(game))
             item.setToolTip(game.name)
             self.games_list.addItem(item)
             self._attach_cover_animation(game, item)
