@@ -40,6 +40,7 @@ SGDB_MAX_CONSECUTIVE_NETWORK_ERRORS = 4
 GFN_KEY_ART_SQUARE_FILL_MIGRATION_STATE_KEY = (
     "geforcenow-key-art-square-fill-migration-done"
 )
+COVER_SUFFIXES = ("gif", "png", "jpg", "jpeg", "webp", "tiff")
 
 
 def _emit_progress(**payload: Any) -> None:
@@ -205,7 +206,7 @@ def _compose_cover(
 
 def _cover_base(covers_dir: Path, game_id: str) -> Path:
     covers_dir.mkdir(parents=True, exist_ok=True)
-    for suffix in ("gif", "tiff", "png", "jpg", "jpeg", "webp"):
+    for suffix in COVER_SUFFIXES:
         (covers_dir / f"{game_id}.{suffix}").unlink(missing_ok=True)
     return covers_dir / game_id
 
@@ -1009,10 +1010,33 @@ def _needs_online_metadata(game_data: dict[str, Any]) -> bool:
 
 def _has_cover(covers_dir: Path, game_id: str) -> bool:
     # Preserve any known local cover format during importer runs.
-    for suffix in ("gif", "png", "jpg", "jpeg", "webp", "tiff"):
+    for suffix in COVER_SUFFIXES:
         if (covers_dir / f"{game_id}.{suffix}").is_file():
             return True
     return False
+
+
+def _delete_existing_cover(
+    covers_dir: Path,
+    game_id: str,
+    *,
+    errors: list[str] | None = None,
+) -> bool:
+    deleted = False
+    for suffix in COVER_SUFFIXES:
+        path = covers_dir / f"{game_id}.{suffix}"
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            if errors is not None:
+                errors.append(
+                    f"Cover cleanup failed for {game_id}: {type(error).__name__}: {error}"
+                )
+            continue
+        deleted = True
+    return deleted
 
 
 def _steam_appid_from_game_data(game_data: dict[str, Any]) -> str | None:
@@ -1664,6 +1688,7 @@ def _run_import() -> dict[str, Any]:
 
             _apply_playtime_minutes(game_data, additional_data.get("playtime_minutes"))
             _write_game(shared.games_dir, game_data)
+            _delete_existing_cover(shared.covers_dir, game_id, errors=errors)
             imported_ids.append(game_id)
             summary.imported += 1
 
