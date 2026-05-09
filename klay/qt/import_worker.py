@@ -487,6 +487,15 @@ def _sync_existing_from_scan(
     return changed
 
 
+def _same_game_identity(existing: dict[str, Any], scanned: dict[str, Any]) -> bool:
+    def _name_token(value: Any) -> str:
+        return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+
+    existing_name = _name_token(existing.get("name"))
+    scanned_name = _name_token(scanned.get("name"))
+    return bool(existing_name and scanned_name and existing_name == scanned_name)
+
+
 def _normalize_metadata_fields(data: dict[str, Any]) -> None:
     def _clean_text(value: Any) -> str | None:
         text = str(value).strip() if value is not None else ""
@@ -1564,7 +1573,14 @@ def _run_import() -> dict[str, Any]:
                 gfn_cover_migration_seen = True
 
             existing = existing_games.get(game_id)
-            if existing and not existing.get("removed", False):
+            existing_is_same_game = (
+                existing is not None and _same_game_identity(existing, game_data)
+            )
+            if (
+                existing
+                and not existing.get("removed", False)
+                and existing_is_same_game
+            ):
                 summary.duplicates += 1
                 metadata_updated = _sync_existing_from_scan(existing, game_data)
                 if _apply_store(existing, additional_data.get("store")):
@@ -1649,11 +1665,12 @@ def _run_import() -> dict[str, Any]:
                 continue
 
             if existing:
-                game_data["last_played"] = int(existing.get("last_played", 0))
-                game_data["hidden"] = bool(existing.get("hidden", False))
+                if existing_is_same_game:
+                    game_data["last_played"] = int(existing.get("last_played", 0))
+                    game_data["hidden"] = bool(existing.get("hidden", False))
+                    game_data["added"] = int(existing.get("added", game_data["added"]))
+                    game_data["categories"] = list(existing.get("categories", []) or [])
                 game_data["removed"] = False
-                game_data["added"] = int(existing.get("added", game_data["added"]))
-                game_data["categories"] = list(existing.get("categories", []) or [])
 
             _apply_store(game_data, additional_data.get("store"))
             if steam_api_helper:
