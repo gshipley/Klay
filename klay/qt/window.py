@@ -26,6 +26,7 @@ from PySide6.QtGui import (
     QIcon,
     QImage,
     QImageReader,
+    QKeyEvent,
     QKeySequence,
     QMovie,
     QPalette,
@@ -68,6 +69,16 @@ from PySide6.QtWidgets import (
 )
 
 from klay import shared
+from klay.qt.controller import (
+    ACTION_ACTIVATE,
+    ACTION_BACK,
+    ACTION_DOWN,
+    ACTION_LEFT,
+    ACTION_MENU,
+    ACTION_RIGHT,
+    ACTION_UP,
+    ControllerManager,
+)
 from klay.qt.library import GameEntry, GameLibrary
 from klay.qt.preferences_dialog import PreferencesDialog
 from klay.qt.settings import GENERAL_BOOL_KEYS, STATE_BOOL_KEYS, STATE_STRING_KEYS, SettingsBackend
@@ -83,6 +94,7 @@ ROLE_PLAYTIME = Qt.ItemDataRole.UserRole + 7
 ROLE_SOURCE_BADGE_PIXMAP = Qt.ItemDataRole.UserRole + 8
 
 COVER_SIZE = QSize(200, 300)
+BIG_PICTURE_COVER_SIZE = QSize(280, 420)
 DETAILS_BADGE_LABEL_SIZE = QSize(108, 108)
 DETAILS_BADGE_ICON_SIZE = QSize(108, 108)
 CARD_BADGE_ICON_SIZE = QSize(56, 34)
@@ -540,9 +552,8 @@ class GameCardDelegate(QStyledItemDelegate):
     BADGE_SLOT_H = 42
     BADGE_GAP = 8
     BADGE_CORNER_INSET = 6
-    BASE_CARD_WIDTH = 216
-    BASE_COVER_HEIGHT = 300
-    MIN_CARD_HEIGHT = 368
+    CARD_WIDTH_EXTRA = 16
+    CARD_HEIGHT_EXTRA = 68
     MIN_COVER_HEIGHT = 140
     MIN_TITLE_PANEL_HEIGHT = 56
 
@@ -605,21 +616,23 @@ class GameCardDelegate(QStyledItemDelegate):
         painter.drawPixmap(badge_rect, badge)
 
     def sizeHint(self, option: QStyleOptionViewItem, index) -> QSize:
+        cover_size = self.window.cover_size
+        card_width = cover_size.width() + self.CARD_WIDTH_EXTRA
         inner_width = (
-            self.BASE_CARD_WIDTH - self.OUTER_MARGIN * 2 - self.INNER_BORDER * 2
+            card_width - self.OUTER_MARGIN * 2 - self.INNER_BORDER * 2
         )
         text_width = inner_width - self.TEXT_PAD_H * 2
         title_panel_height, _meta_height = self._title_panel_height(
             option, index, text_width=text_width
         )
         card_height = max(
-            self.MIN_CARD_HEIGHT,
-            self.BASE_COVER_HEIGHT
+            cover_size.height() + self.CARD_HEIGHT_EXTRA,
+            cover_size.height()
             + title_panel_height
             + self.OUTER_MARGIN * 2
             + self.INNER_BORDER * 2,
         )
-        return QSize(self.BASE_CARD_WIDTH, card_height)
+        return QSize(card_width, card_height)
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index) -> None:
         painter.save()
@@ -646,17 +659,18 @@ class GameCardDelegate(QStyledItemDelegate):
             title_color = QColor("#f3f3f6")
             meta_color = QColor("#c4c4ce")
 
-        if hovered:
+        if selected:
             border = option.palette.highlight().color()
-        elif selected:
-            border = option.palette.mid().color()
+        elif hovered:
+            border = option.palette.highlight().color()
 
         shadow_rect = rect.adjusted(0, 1, 0, 1)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(0, 0, 0, 18))
         painter.drawRoundedRect(shadow_rect, 10, 10)
 
-        painter.setPen(QPen(border, 1.2))
+        border_width = 3.0 if selected and self.window.big_picture_mode else 1.2
+        painter.setPen(QPen(border, border_width))
         painter.setBrush(background)
         painter.drawRoundedRect(rect, 10, 10)
 
@@ -1128,6 +1142,15 @@ class KlayMainWindow(QMainWindow):
         self.current_filter = "all"
         self.sort_mode = "last_played"
         self.show_hidden = False
+        self.big_picture_mode = False
+        self.cover_size = QSize(COVER_SIZE)
+        self._pre_big_picture_geometry = None
+        self._pre_big_picture_splitter_sizes: list[int] = []
+        self._pre_big_picture_sidebar_visible = False
+        self._pre_big_picture_search_checked = False
+        self._pre_big_picture_search_text = ""
+        self._pre_big_picture_status_visible = True
+        self._pre_big_picture_was_maximized = False
         self.cover_cache: dict[str, QPixmap] = {}
         self.cover_movies: dict[str, QMovie] = {}
         self.cover_search_cache: dict[
@@ -1171,6 +1194,16 @@ class KlayMainWindow(QMainWindow):
         self._apply_color_mode()
         self._build_ui()
         self._build_actions()
+        self.controller_manager = ControllerManager(self)
+        self.controller_manager.action.connect(self._handle_controller_action)
+        self.controller_manager.controllers_changed.connect(
+            self._update_controller_status
+        )
+        main_menu = self.main_menu_button.menu()
+        if main_menu is not None:
+            main_menu.aboutToHide.connect(self.controller_manager.reset_input)
+        self.controller_manager.start()
+        self._update_controller_status(self.controller_manager.controller_names)
         self._load_state()
         self.reload_games()
 
@@ -1265,6 +1298,7 @@ class KlayMainWindow(QMainWindow):
         title_font = QFont(self.font())
         title_font.setBold(True)
         self.page_title.setFont(title_font)
+        self._page_title_normal_font = QFont(title_font)
         header.addWidget(self.page_title)
         header.addStretch(1)
 
@@ -1275,11 +1309,32 @@ class KlayMainWindow(QMainWindow):
         self.search_toggle.toggled.connect(self.toggle_search_row)
         header.addWidget(self.search_toggle)
 
+        self.controller_status_label = QLabel("No controller detected")
+        self.controller_status_label.setObjectName("ControllerStatus")
+        self.controller_status_label.setToolTip(
+            "Connect a controller to navigate Big Picture Mode"
+        )
+        self.controller_status_label.setVisible(False)
+        header.addWidget(self.controller_status_label)
+
         self.main_menu_button = QToolButton()
         self.main_menu_button.setIcon(QIcon.fromTheme("open-menu-symbolic"))
         self.main_menu_button.setToolTip("Main Menu")
         self.main_menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         header.addWidget(self.main_menu_button)
+
+        self.big_picture_exit_button = QToolButton()
+        self.big_picture_exit_button.setText("Exit Big Picture")
+        self.big_picture_exit_button.setIcon(QIcon.fromTheme("view-restore-symbolic"))
+        self.big_picture_exit_button.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        self.big_picture_exit_button.setToolTip("Exit Big Picture Mode (F11 or Escape)")
+        self.big_picture_exit_button.clicked.connect(
+            lambda: self.big_picture_action.setChecked(False)
+        )
+        self.big_picture_exit_button.setVisible(False)
+        header.addWidget(self.big_picture_exit_button)
 
         main_layout.addLayout(header)
 
@@ -1305,6 +1360,7 @@ class KlayMainWindow(QMainWindow):
         self.games_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.games_list.setSpacing(12)
         self.games_list.setIconSize(COVER_SIZE)
+        self._games_list_normal_font = QFont(self.games_list.font())
         self.games_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.games_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.games_list.setMouseTracking(True)
@@ -1419,6 +1475,7 @@ class KlayMainWindow(QMainWindow):
         title_font.setPointSize(title_font.pointSize() + 9)
         title_font.setBold(True)
         self.details_title.setFont(title_font)
+        self._details_title_normal_font = QFont(title_font)
         self.details_title.setWordWrap(True)
         self.details_title.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         title_row.addWidget(self.details_title, 1)
@@ -1501,6 +1558,7 @@ class KlayMainWindow(QMainWindow):
         right.addLayout(dates_row)
 
         executable_heading = QLabel("Executable")
+        self.details_executable_heading = executable_heading
         heading_font = QFont(self.font())
         heading_font.setBold(True)
         executable_heading.setFont(heading_font)
@@ -1515,6 +1573,7 @@ class KlayMainWindow(QMainWindow):
 
         button_row = QHBoxLayout()
         self.details_play_btn = QPushButton("Play")
+        self._details_play_normal_font = QFont(self.details_play_btn.font())
         self.details_play_btn.clicked.connect(self.launch_active_game_from_details)
         button_row.addWidget(self.details_play_btn)
 
@@ -1567,6 +1626,22 @@ class KlayMainWindow(QMainWindow):
         self.details_cover_picker_btn.setText("Change Cover")
         self.details_cover_picker_btn.clicked.connect(self.choose_cover_for_active_game)
         button_row.addWidget(self.details_cover_picker_btn)
+
+        self.details_management_buttons = (
+            self.details_edit_btn,
+            self.details_categories_btn,
+            self.details_hide_btn,
+            self.details_remove_btn,
+            self.details_search_btn,
+            self.details_refresh_metadata_btn,
+            self.details_cover_picker_btn,
+        )
+        self.big_picture_secondary_details_widgets = (
+            self.details_added,
+            self.details_last_played,
+            self.details_executable_heading,
+            self.details_executable,
+        )
 
         button_row.addStretch(1)
         right.addLayout(button_row)
@@ -1637,6 +1712,10 @@ class KlayMainWindow(QMainWindow):
             }
             QLabel#SidebarTitle {
                 font-weight: 600;
+            }
+            QLabel#ControllerStatus {
+                color: palette(midlight);
+                padding: 4px 8px;
             }
             QListWidget#SidebarList {
                 border: none;
@@ -1738,6 +1817,12 @@ class KlayMainWindow(QMainWindow):
         )
         self.addAction(self.toggle_search_action)
 
+        self.big_picture_action = QAction("Big Picture Mode", self)
+        self.big_picture_action.setShortcut(QKeySequence("F11"))
+        self.big_picture_action.setCheckable(True)
+        self.big_picture_action.toggled.connect(self.set_big_picture_mode)
+        self.addAction(self.big_picture_action)
+
         self.go_to_parent_action = QAction("Back", self)
         self.go_to_parent_action.setShortcut(QKeySequence("Alt+Up"))
         self.go_to_parent_action.triggered.connect(self.show_library_page)
@@ -1772,6 +1857,8 @@ class KlayMainWindow(QMainWindow):
         self.addAction(self.reload_action)
 
         menu = QMenu(self)
+        menu.addAction(self.big_picture_action)
+        menu.addSeparator()
         menu.addMenu(sort_menu)
         menu.addAction(self.show_hidden_action)
         menu.addSeparator()
@@ -1780,9 +1867,25 @@ class KlayMainWindow(QMainWindow):
         menu.addAction(self.reload_action)
         self.main_menu_button.setMenu(menu)
 
-        QShortcut(QKeySequence(Qt.Key.Key_Return), self).activated.connect(
-            self.activate_selected_game
+        self.navigation_shortcuts: list[QShortcut] = []
+        for key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            shortcut = QShortcut(QKeySequence(key), self)
+            shortcut.activated.connect(self._activate_big_picture_selection)
+            self.navigation_shortcuts.append(shortcut)
+
+        self.big_picture_space_shortcut = QShortcut(
+            QKeySequence(Qt.Key.Key_Space), self
         )
+        self.big_picture_space_shortcut.activated.connect(
+            self._activate_big_picture_selection
+        )
+        self.big_picture_space_shortcut.setEnabled(False)
+        self.navigation_shortcuts.append(self.big_picture_space_shortcut)
+
+        for key in (Qt.Key.Key_Escape, Qt.Key.Key_Backspace):
+            shortcut = QShortcut(QKeySequence(key), self)
+            shortcut.activated.connect(self._handle_back_navigation)
+            self.navigation_shortcuts.append(shortcut)
 
     def _load_state(self) -> None:
         geometry = self.settings.value("window/geometry")
@@ -1809,11 +1912,21 @@ class KlayMainWindow(QMainWindow):
         self.show_hidden_action.setChecked(self.show_hidden)
 
     def _save_state(self) -> None:
-        self.settings.setValue("window/geometry", self.saveGeometry())
-        self.settings.setValue("window/splitter_sizes", self.splitter.sizes())
+        geometry = self.saveGeometry()
+        splitter_sizes = self.splitter.sizes()
+        sidebar_visible = self.sidebar_frame.isVisible()
+        if self.big_picture_mode:
+            if self._pre_big_picture_geometry is not None:
+                geometry = self._pre_big_picture_geometry
+            if self._pre_big_picture_splitter_sizes:
+                splitter_sizes = self._pre_big_picture_splitter_sizes
+            sidebar_visible = self._pre_big_picture_sidebar_visible
+
+        self.settings.setValue("window/geometry", geometry)
+        self.settings.setValue("window/splitter_sizes", splitter_sizes)
         self.settings.setValue("state/show_hidden", self.show_hidden)
         self.runtime_settings.set_state_string("sort-mode", self.sort_mode)
-        self.runtime_settings.set_state_bool("show-sidebar", self.sidebar_frame.isVisible())
+        self.runtime_settings.set_state_bool("show-sidebar", sidebar_visible)
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         if self.import_thread is not None and self.import_thread.isRunning():
@@ -1830,6 +1943,7 @@ class KlayMainWindow(QMainWindow):
             return
 
         self._stop_geforcenow_autoclose_monitor()
+        self.controller_manager.stop()
         self._save_state()
         super().closeEvent(event)
 
@@ -2201,6 +2315,308 @@ class KlayMainWindow(QMainWindow):
         self.runtime_settings.set_state_string("sort-mode", mode)
         self.apply_filters(select_game_id=self.selected_game_id())
 
+    @staticmethod
+    def _font_with_delta(font: QFont, delta: float, *, bold: bool | None = None) -> QFont:
+        updated = QFont(font)
+        point_size = updated.pointSizeF()
+        if point_size > 0:
+            updated.setPointSizeF(max(8.0, point_size + delta))
+        if bold is not None:
+            updated.setBold(bold)
+        return updated
+
+    def _apply_big_picture_presentation(self, enabled: bool) -> None:
+        self.cover_size = QSize(BIG_PICTURE_COVER_SIZE if enabled else COVER_SIZE)
+        self.games_list.setIconSize(self.cover_size)
+        self.games_list.setSpacing(22 if enabled else 12)
+        self.games_list.setFont(
+            self._font_with_delta(self._games_list_normal_font, 2.0, bold=enabled)
+            if enabled
+            else QFont(self._games_list_normal_font)
+        )
+
+        self.page_title.setFont(
+            self._font_with_delta(self._page_title_normal_font, 5.0, bold=True)
+            if enabled
+            else QFont(self._page_title_normal_font)
+        )
+        self.details_title.setFont(
+            self._font_with_delta(self._details_title_normal_font, 3.0, bold=True)
+            if enabled
+            else QFont(self._details_title_normal_font)
+        )
+        self.details_play_btn.setFont(
+            self._font_with_delta(self._details_play_normal_font, 3.0, bold=True)
+            if enabled
+            else QFont(self._details_play_normal_font)
+        )
+        self.details_play_btn.setMinimumHeight(58 if enabled else 0)
+
+        self.toggle_sidebar_btn.setVisible(not enabled)
+        self.add_menu_button.setVisible(not enabled)
+        self.search_toggle.setVisible(not enabled)
+        self.controller_status_label.setVisible(enabled)
+        self.big_picture_exit_button.setVisible(enabled)
+        self.toggle_sidebar_action.setEnabled(not enabled)
+        self.toggle_search_action.setEnabled(not enabled)
+        self.big_picture_space_shortcut.setEnabled(enabled)
+
+        for widget in self.details_management_buttons:
+            widget.setVisible(not enabled)
+        for widget in self.big_picture_secondary_details_widgets:
+            widget.setVisible(not enabled)
+
+        if enabled:
+            self.details_cover.setMinimumSize(240, 360)
+            self.details_cover.setMaximumSize(300, 450)
+        else:
+            self.details_cover.setMinimumSize(180, 270)
+            self.details_cover.setMaximumSize(220, 330)
+
+        self.statusBar().setVisible(
+            False if enabled else self._pre_big_picture_status_visible
+        )
+        self.setWindowTitle("Klay — Big Picture" if enabled else "Klay")
+        self._update_details_card_size()
+
+    def set_big_picture_mode(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if self.big_picture_action.isChecked() != enabled:
+            self.big_picture_action.blockSignals(True)
+            self.big_picture_action.setChecked(enabled)
+            self.big_picture_action.blockSignals(False)
+        if self.big_picture_mode == enabled:
+            return
+
+        selected_game_id = self.selected_game_id()
+        active_game = self.active_game()
+        showing_details = self.navigation_stack.currentWidget() == self.details_page
+
+        if enabled:
+            self._pre_big_picture_geometry = self.saveGeometry()
+            self._pre_big_picture_splitter_sizes = self.splitter.sizes()
+            self._pre_big_picture_sidebar_visible = self.sidebar_frame.isVisible()
+            self._pre_big_picture_search_checked = self.search_toggle.isChecked()
+            self._pre_big_picture_search_text = self.search_entry.text()
+            self._pre_big_picture_status_visible = self.statusBar().isVisible()
+            self._pre_big_picture_was_maximized = self.isMaximized()
+            self.big_picture_mode = True
+            self.sidebar_frame.setVisible(False)
+            self.search_toggle.blockSignals(True)
+            self.search_toggle.setChecked(False)
+            self.search_toggle.blockSignals(False)
+            self.search_entry.blockSignals(True)
+            self.search_entry.clear()
+            self.search_entry.blockSignals(False)
+            self.search_row.setVisible(False)
+            self._apply_big_picture_presentation(True)
+            self.showFullScreen()
+        else:
+            self.big_picture_mode = False
+            self._apply_big_picture_presentation(False)
+            self.sidebar_frame.setVisible(
+                self._pre_big_picture_sidebar_visible and not self.show_hidden
+            )
+            self.search_toggle.blockSignals(True)
+            self.search_toggle.setChecked(self._pre_big_picture_search_checked)
+            self.search_toggle.blockSignals(False)
+            self.search_entry.blockSignals(True)
+            self.search_entry.setText(self._pre_big_picture_search_text)
+            self.search_entry.blockSignals(False)
+            self.search_row.setVisible(
+                self._pre_big_picture_search_checked
+                and self.navigation_stack.currentWidget() == self.library_page
+            )
+            self.showNormal()
+            if self._pre_big_picture_geometry is not None:
+                self.restoreGeometry(self._pre_big_picture_geometry)
+            if self._pre_big_picture_splitter_sizes:
+                self.splitter.setSizes(self._pre_big_picture_splitter_sizes)
+            if self._pre_big_picture_was_maximized:
+                self.showMaximized()
+
+        self.controller_manager.set_enabled(enabled)
+
+        self.cover_cache.clear()
+        self.apply_filters(select_game_id=selected_game_id)
+        if showing_details and active_game is not None:
+            self.open_game_details(active_game)
+        elif enabled:
+            QTimer.singleShot(0, self._focus_big_picture_library)
+
+    def _activate_big_picture_selection(self) -> None:
+        if (
+            self.big_picture_mode
+            and self.navigation_stack.currentWidget() == self.details_page
+        ):
+            self.launch_active_game_from_details()
+            return
+        self.activate_selected_game()
+
+    @staticmethod
+    def _controller_key(action: str) -> Qt.Key | None:
+        return {
+            ACTION_UP: Qt.Key.Key_Up,
+            ACTION_DOWN: Qt.Key.Key_Down,
+            ACTION_LEFT: Qt.Key.Key_Left,
+            ACTION_RIGHT: Qt.Key.Key_Right,
+            ACTION_ACTIVATE: Qt.Key.Key_Return,
+            ACTION_BACK: Qt.Key.Key_Escape,
+        }.get(action)
+
+    @staticmethod
+    def _send_controller_key(target: QWidget, key: Qt.Key) -> None:
+        event = QKeyEvent(
+            QEvent.Type.KeyPress,
+            key,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(target, event)
+
+    def _handle_controller_action(self, action: str) -> None:
+        if not self.big_picture_mode:
+            return
+
+        app = QApplication.instance()
+        if app is None:
+            return
+
+        popup = app.activePopupWidget()
+        if popup is not None:
+            popup_action = ACTION_BACK if action == ACTION_MENU else action
+            key = self._controller_key(popup_action)
+            if key is not None:
+                self._send_controller_key(popup, key)
+                if popup_action in {ACTION_ACTIVATE, ACTION_BACK}:
+                    QTimer.singleShot(
+                        0,
+                        lambda overlay=popup: self._reset_if_overlay_closed(overlay),
+                    )
+            return
+
+        modal = app.activeModalWidget()
+        if modal is not None and modal is not self:
+            key = self._controller_key(action)
+            if key is None:
+                return
+            target = app.focusWidget()
+            if target is None or (target is not modal and not modal.isAncestorOf(target)):
+                target = modal
+            self._send_controller_key(target, key)
+            if action in {ACTION_ACTIVATE, ACTION_BACK}:
+                QTimer.singleShot(
+                    0,
+                    lambda overlay=modal: self._reset_if_overlay_closed(overlay),
+                )
+            return
+
+        if action == ACTION_MENU:
+            self._show_controller_menu()
+            return
+
+        if self.navigation_stack.currentWidget() == self.details_page:
+            if action == ACTION_BACK:
+                self.show_library_page()
+            elif action == ACTION_ACTIVATE:
+                focused = app.focusWidget()
+                if focused is self.details_back_btn:
+                    self.details_back_btn.click()
+                else:
+                    self.details_play_btn.click()
+            elif action in {ACTION_UP, ACTION_LEFT}:
+                self.details_back_btn.setFocus()
+            elif action in {ACTION_DOWN, ACTION_RIGHT}:
+                self.details_play_btn.setFocus()
+            return
+
+        if action == ACTION_BACK:
+            self._handle_back_navigation()
+            return
+
+        if self.content_stack.currentWidget() is not self.games_list:
+            if (
+                action == ACTION_ACTIVATE
+                and self.empty_import_button.isVisible()
+                and self.empty_import_button.isEnabled()
+            ):
+                self.empty_import_button.click()
+            return
+
+        if action == ACTION_ACTIVATE:
+            self._activate_big_picture_selection()
+            return
+
+        key = self._controller_key(action)
+        if key is not None:
+            self.games_list.setFocus()
+            self._send_controller_key(self.games_list, key)
+
+    def _reset_if_overlay_closed(self, overlay: QWidget) -> None:
+        app = QApplication.instance()
+        if app is None:
+            return
+        if app.activePopupWidget() is overlay or app.activeModalWidget() is overlay:
+            return
+        self.controller_manager.reset_input()
+
+    def _show_controller_menu(self) -> None:
+        menu = self.main_menu_button.menu()
+        if menu is None:
+            return
+        if self.main_menu_button.isVisible():
+            position = self.main_menu_button.mapToGlobal(
+                QPoint(0, self.main_menu_button.height())
+            )
+        else:
+            position = self.mapToGlobal(
+                QPoint(
+                    max(12, self.width() - menu.sizeHint().width() - 24),
+                    48,
+                )
+            )
+        menu.popup(position)
+
+        def _select_first_action() -> None:
+            for action in menu.actions():
+                if action.isVisible() and action.isEnabled() and not action.isSeparator():
+                    menu.setActiveAction(action)
+                    break
+
+        QTimer.singleShot(0, _select_first_action)
+
+    def _update_controller_status(self, names: object) -> None:
+        controller_names = tuple(str(name) for name in names) if names else ()
+        if not controller_names:
+            self.controller_status_label.setText("No controller detected")
+            self.controller_status_label.setToolTip(
+                "Connect a controller to navigate Big Picture Mode"
+            )
+            return
+        if len(controller_names) == 1:
+            self.controller_status_label.setText(f"Controller: {controller_names[0]}")
+        else:
+            self.controller_status_label.setText(
+                f"{len(controller_names)} controllers connected"
+            )
+        self.controller_status_label.setToolTip("\n".join(controller_names))
+
+    def _focus_big_picture_library(self) -> None:
+        if not self.big_picture_mode:
+            return
+        if self.content_stack.currentWidget() is self.games_list:
+            self.games_list.setFocus()
+        elif self.empty_import_button.isVisible() and self.empty_import_button.isEnabled():
+            self.empty_import_button.setFocus()
+        else:
+            self.main_menu_button.setFocus()
+
+    def _handle_back_navigation(self) -> None:
+        if self.navigation_stack.currentWidget() == self.details_page:
+            self.show_library_page()
+            return
+        if self.big_picture_mode:
+            self.big_picture_action.setChecked(False)
+
     def toggle_search_row(self, show: bool) -> None:
         if self.navigation_stack.currentWidget() != self.library_page:
             self.search_toggle.setChecked(False)
@@ -2214,13 +2630,15 @@ class KlayMainWindow(QMainWindow):
             self.search_entry.clear()
 
     def toggle_sidebar(self) -> None:
+        if self.big_picture_mode:
+            return
         visible = not self.sidebar_frame.isVisible()
         self.sidebar_frame.setVisible(visible)
         self.runtime_settings.set_state_bool("show-sidebar", visible)
 
     def toggle_show_hidden(self, show_hidden: bool) -> None:
         self.show_hidden = show_hidden
-        if show_hidden:
+        if show_hidden or self.big_picture_mode:
             self.sidebar_frame.setVisible(False)
         else:
             self.sidebar_frame.setVisible(
@@ -2238,14 +2656,18 @@ class KlayMainWindow(QMainWindow):
         self.show_library_page()
 
     def show_library_page(self) -> None:
+        if hasattr(self, "controller_manager"):
+            self.controller_manager.reset_input()
         self.navigation_stack.setCurrentWidget(self.library_page)
         self.details_backdrop.clear()
         self.active_details_cover = None
         if self.details_cover_movie is not None:
             self.details_cover_movie.stop()
             self.details_cover_movie = None
-        if self.search_toggle.isChecked():
+        if self.search_toggle.isChecked() and not self.big_picture_mode:
             self.search_row.setVisible(True)
+        if self.big_picture_mode:
+            QTimer.singleShot(0, self._focus_big_picture_library)
 
     def _sorted_games(self, games: list[GameEntry]) -> list[GameEntry]:
         if self.sort_mode == "a-z":
@@ -2267,12 +2689,19 @@ class KlayMainWindow(QMainWindow):
         )
 
     def _placeholder_cover(self) -> QPixmap:
-        pixmap = QPixmap(COVER_SIZE)
+        pixmap = QPixmap(self.cover_size)
         pixmap.fill(QColor("#1f1f24"))
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setPen(QPen(QColor("#4a4a55"), 2))
-        painter.drawRoundedRect(2, 2, COVER_SIZE.width() - 4, COVER_SIZE.height() - 4, 10, 10)
+        painter.drawRoundedRect(
+            2,
+            2,
+            self.cover_size.width() - 4,
+            self.cover_size.height() - 4,
+            10,
+            10,
+        )
         painter.setPen(QColor("#d6d6db"))
         painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "NO COVER")
         painter.end()
@@ -2300,7 +2729,7 @@ class KlayMainWindow(QMainWindow):
         if pixmap.isNull():
             pixmap = self._placeholder_cover()
         else:
-            pixmap = _fit_cover(pixmap, COVER_SIZE)
+            pixmap = _fit_cover(pixmap, self.cover_size)
         self.cover_cache[game.game_id] = pixmap
         return pixmap
 
@@ -2329,7 +2758,9 @@ class KlayMainWindow(QMainWindow):
             if frame.isNull():
                 return
             try:
-                list_item.setData(ROLE_COVER_PIXMAP, _fit_cover(frame, COVER_SIZE))
+                list_item.setData(
+                    ROLE_COVER_PIXMAP, _fit_cover(frame, self.cover_size)
+                )
             except RuntimeError:
                 # Item no longer exists (list refreshed).
                 m.stop()
@@ -4051,7 +4482,13 @@ class KlayMainWindow(QMainWindow):
         self._apply_details_accent(accent)
 
     def _details_cover_target_size(self) -> QSize:
-        width = max(180, min(220, self.details_cover.width() or 200))
+        maximum_width = 300 if self.big_picture_mode else 220
+        minimum_width = 240 if self.big_picture_mode else 180
+        default_width = 280 if self.big_picture_mode else 200
+        width = max(
+            minimum_width,
+            min(maximum_width, self.details_cover.width() or default_width),
+        )
         height = int(width * 1.5)
         return QSize(width, height)
 
@@ -4059,7 +4496,8 @@ class KlayMainWindow(QMainWindow):
         if not hasattr(self, "details_body_frame"):
             return
         available = max(340, self.details_page.width() - 96)
-        self.details_body_frame.setMaximumWidth(min(980, available))
+        maximum_width = 1360 if self.big_picture_mode else 980
+        self.details_body_frame.setMaximumWidth(min(maximum_width, available))
 
     def _cover_accent_color(self, pixmap: QPixmap) -> QColor:
         image = pixmap.toImage().convertToFormat(QImage.Format.Format_ARGB32)
@@ -4093,6 +4531,8 @@ class KlayMainWindow(QMainWindow):
         )
 
     def open_game_details(self, game: GameEntry) -> None:
+        if hasattr(self, "controller_manager"):
+            self.controller_manager.reset_input()
         self.active_game_id = game.game_id
 
         self.details_header_title.setText(game.name)
@@ -4184,6 +4624,8 @@ class KlayMainWindow(QMainWindow):
         self.navigation_stack.setCurrentWidget(self.details_page)
         self.search_row.setVisible(False)
         self._update_details_card_size()
+        if self.big_picture_mode:
+            QTimer.singleShot(0, self.details_play_btn.setFocus)
 
     def show_context_menu(self, position: QPoint) -> None:
         item = self.games_list.itemAt(position)

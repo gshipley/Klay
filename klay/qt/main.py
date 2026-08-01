@@ -26,6 +26,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default="",
         help="Run a game with the given game_id",
     )
+    parser.add_argument(
+        "-b",
+        "--big-picture",
+        action="store_true",
+        help="Open in fullscreen Big Picture Mode",
+    )
     return parser.parse_args(argv)
 
 
@@ -212,6 +218,9 @@ def main(_version: str, argv: list[str] | None = None) -> int:
 
     settings = SettingsBackend(data_dir_name)
     show_splash = settings.get_bool("show-splash", GENERAL_BOOL_KEYS["show-splash"])
+    start_big_picture = args.big_picture or settings.get_bool(
+        "start-big-picture", GENERAL_BOOL_KEYS["start-big-picture"]
+    )
 
     splash: QSplashScreen | None = None
     splash_player = None
@@ -284,7 +293,10 @@ def main(_version: str, argv: list[str] | None = None) -> int:
                     app.processEvents()
                     time.sleep(0.02)
 
-    window.show()
+    if start_big_picture:
+        window.set_big_picture_mode(True)
+    else:
+        window.show()
 
     if show_splash and splash is not None:
         if splash_player is not None:
