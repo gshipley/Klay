@@ -1,5 +1,7 @@
 # Klay - Play your games on KDE
 
+**Note: ** Klay kind of sucks until you provide a streamgrid api key and also a IGDB api key. It's kind of a pain to create these but worth it!
+
 I built Klay because I love Linux and I am also a huge gaming nerd. I recently switched to Bazzite (based on Fedora, btw.), and my game library was scattered across too many places.
 
 Some were in Steam. Some were cloud-only in GeForce NOW (thank you anti-cheat), and some were from Heroic, Lutris, Bottles, itch, or random desktop launchers. I wanted one launcher that felt native on KDE and gave me one clean library to manage. I was tired of the different ways to launch games. I used Cartridges for a long time, but I felt the time was right to go in a different direction. Something that suited me, and something I am proud to share in case it helps others as well. 
