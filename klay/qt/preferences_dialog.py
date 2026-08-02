@@ -213,6 +213,16 @@ class PreferencesDialog(QDialog):
         )
         layout.addWidget(
             self._checkbox(
+                "start-big-picture",
+                "Start in Big Picture Mode",
+                default=GENERAL_BOOL_KEYS["start-big-picture"],
+                tooltip=(
+                    "Open Klay fullscreen with larger game cards and simplified controls."
+                ),
+            )
+        )
+        layout.addWidget(
+            self._checkbox(
                 "auto-import",
                 "Automatically import games on startup",
                 default=GENERAL_BOOL_KEYS["auto-import"],

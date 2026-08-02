@@ -2,6 +2,9 @@
 <schemalist gettext-domain="@GETTEXT_DOMAIN@">
 
   <schema id="@APP_ID@" path="@PREFIX@/">
+    <key name="start-big-picture" type="b">
+      <default>false</default>
+    </key>
     <key name="show-splash" type="b">
       <default>false</default>
     </key>

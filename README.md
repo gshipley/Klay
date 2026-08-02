@@ -53,6 +53,7 @@ Klay is probably not for you if you only use a single launcher and never want to
 - SteamGridDB + IGDB integration for covers and metadata (you provide your own API keys)
 - Playtime on game cards when source data is available
 - Category management (create, rename, delete, assign, custom icons)
+- Couch-friendly Big Picture Mode with native controller navigation
 - Optional splash screen + startup sound
 
 ## Screenshots
@@ -123,6 +124,25 @@ Optional:
 
 - `klay --search "term"`: open with a pre-filled search term
 - `klay --launch GAME_ID`: launch a game directly by id
+- `klay -b` or `klay --big-picture`: open fullscreen in the couch-friendly Big Picture Mode
+
+## Big Picture Mode
+
+Use `F11` or the main menu to enter a fullscreen library with larger game cards
+and simplified controls. With a controller, use the D-pad or left stick to
+navigate, A/Cross to select or play, B/Circle to go back, and Start/Menu to open
+the main menu. To close Klay with a controller, press Start/Menu, navigate to
+`Quit Klay`, and confirm with A/Cross. Klay detects controllers connected before
+or after startup and shows their connection state in the Big Picture header.
+
+Keyboard controls remain available: use the arrow keys to navigate, `Enter` or
+`Space` to select, and `Escape` or `Backspace` to go back or leave Big Picture
+Mode. Keyboard-emulating TV remotes and Steam Input mappings use the same keys.
+
+Enable `Start in Big Picture Mode` under `Preferences -> General` to make it
+the default at startup, or launch once with `klay --big-picture`.
+
+Native controller access in the Flatpak requires Flatpak 1.15.6 or newer.
 
 ## Using Klay
 
