@@ -1838,7 +1838,7 @@ class KlayMainWindow(QMainWindow):
         self.undo_action.triggered.connect(self.undo_last_action)
         self.addAction(self.undo_action)
 
-        self.close_action = QAction("Close", self)
+        self.close_action = QAction("Quit Klay", self)
         self.close_action.setShortcut(QKeySequence.Close)
         self.close_action.triggered.connect(self.close)
         self.addAction(self.close_action)
@@ -1865,6 +1865,8 @@ class KlayMainWindow(QMainWindow):
         menu.addAction(self.preferences_action)
         menu.addAction(self.about_action)
         menu.addAction(self.reload_action)
+        menu.addSeparator()
+        menu.addAction(self.close_action)
         self.main_menu_button.setMenu(menu)
 
         self.navigation_shortcuts: list[QShortcut] = []
