@@ -1,6 +1,6 @@
 # Klay - Play your games on KDE
 
-**Note: ** Klay kind of sucks until you provide a streamgrid api key and also a IGDB api key. It's kind of a pain to create these but worth it!
+**Note:** Klay kind of sucks until you provide a streamgrid api key and also a IGDB api key. It's kind of a pain to create these but worth it!
 
 I built Klay because I love Linux and I am also a huge gaming nerd. I recently switched to Bazzite (based on Fedora, btw.), and my game library was scattered across too many places.
 
