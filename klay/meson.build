@@ -15,6 +15,7 @@ install_subdir('qt', install_dir: moduledir)
 install_data(
   [
     'extensions.py',
+    'game.py',
     configure_file(input: 'shared.py.in', output: 'shared.py', configuration: conf),
   ],
   install_dir: moduledir,
