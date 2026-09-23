@@ -1366,7 +1366,7 @@ class KlayMainWindow(QMainWindow):
         self.games_list.setMouseTracking(True)
         self.games_list.setItemDelegate(GameCardDelegate(self, self.games_list))
         self.games_list.viewport().installEventFilter(self)
-        self.games_list.itemClicked.connect(lambda _item: self.open_selected_details())
+        self.games_list.itemClicked.connect(lambda _item: self.activate_selected_game())
         self.games_list.itemActivated.connect(self.activate_selected_game)
         self.games_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.games_list.customContextMenuRequested.connect(self.show_context_menu)
@@ -1956,6 +1956,9 @@ class KlayMainWindow(QMainWindow):
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # type: ignore[override]
         if watched is self.games_list.viewport():
+            if event.type() == QEvent.Type.MouseButtonDblClick:
+                # The first click already activated the card; avoid launching it twice.
+                return True
             if event.type() == QEvent.Type.MouseMove:
                 if hasattr(event, "position"):
                     point = event.position().toPoint()  # type: ignore[attr-defined]
