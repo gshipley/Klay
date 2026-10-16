@@ -1,19 +1,28 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 from klay import shared
+from klay.qt import jail
 from klay.qt.library import GameLibrary
 from klay.qt.settings import GENERAL_BOOL_KEYS, SettingsBackend
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="klay")
+    parser.add_argument(
+        "--check-jail",
+        default="",
+        metavar="GAME_ID",
+        help="Check a game's jail and available graphics APIs without launching it",
+    )
     parser.add_argument(
         "-s",
         "--search",
@@ -41,8 +50,26 @@ def _run_launch_mode(library: GameLibrary, game_id: str) -> int:
         print(f"Game not found: {game_id}", file=sys.stderr)
         return 1
 
+    process = None
     try:
-        library.launch(game)
+        process = library.launch(game)
+        if game.jail_enabled:
+            warning = getattr(process, "jail_warning", "")
+            if warning:
+                print(warning, file=sys.stderr)
+            exit_code = process.wait()
+            if exit_code:
+                report = library.jail_report(game)
+                message = report.get("error") or f"runner exited with status {exit_code}"
+                print(f"Jail launch failed for '{game.name}': {message}", file=sys.stderr)
+                return exit_code if 0 < exit_code < 126 else 1
+    except KeyboardInterrupt:
+        if game.jail_enabled and process is not None:
+            try:
+                jail.stop_game(process)
+            except OSError as error:
+                print(f"Failed to stop the jail for '{game.name}': {error}", file=sys.stderr)
+        return 130
     except OSError as error:
         print(f"Failed to launch '{game.name}': {error}", file=sys.stderr)
         return 1
@@ -185,7 +212,25 @@ def main(_version: str, argv: list[str] | None = None) -> int:
     data_dir_name = os.getenv("KLAY_DATA_DIR_NAME", "klay")
     library = GameLibrary(data_dir_name=data_dir_name)
 
+    if args.check_jail:
+        if args.launch:
+            print("Choose either --check-jail or --launch.", file=sys.stderr)
+            return 2
+        game = library.load_game_by_id(args.check_jail)
+        if game is None:
+            print(f"Game not found: {args.check_jail}", file=sys.stderr)
+            return 1
+        try:
+            print(json.dumps(library.check_jail(game), indent=2))
+        except OSError as error:
+            print(f"Jail check failed: {error}", file=sys.stderr)
+            return 1
+        return 0
+
     if args.launch:
+        # The desktop launcher uses SIG_DFL for GUI exits. CLI mode needs
+        # Python's interrupt handler so it can stop its detached supervisor.
+        signal.signal(signal.SIGINT, signal.default_int_handler)
         return _run_launch_mode(library, args.launch)
 
     try:

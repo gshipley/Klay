@@ -56,6 +56,7 @@ Klay is probably not for you if you only use a single launcher and never want to
 - Playtime on game cards when source data is available
 - Category management (create, rename, delete, assign, custom icons)
 - Couch-friendly Big Picture Mode with native controller navigation
+- Optional offline game jail for local Windows games, with a separate game copy, Wine prefix, saves, and launch log
 - Optional splash screen + startup sound
 
 ## Screenshots
@@ -85,28 +86,48 @@ flatpak run com.grantshipley.Klay.Devel
 
 ## Build From Source
 
-```bash
-meson setup _build
-meson compile -C _build
-```
-
-Run:
+For a native Linux development build, install the runtime dependencies below
+and the Meson build tools (`gettext`, `glib2-devel`, and `desktop-file-utils` on
+Fedora), then run:
 
 ```bash
-./_build/klay/klay
+./build-aux/dev setup
 ```
+
+This creates a persistent `.venv` in the checkout, reuses the host's Python
+packages, and installs Meson and Ninja into that environment. On Toolbox or
+Distrobox, the script builds and runs on the desktop host so graphics libraries
+match the installed driver. It does not install system packages.
+
+Build and run the current source:
+
+```bash
+./build-aux/dev run
+```
+
+Run the build checks and tests without opening the app:
+
+```bash
+./build-aux/dev test
+```
+
+Use `./build-aux/dev build` to compile without launching. Rerun `setup` after
+changing the host Python version or moving the checkout; it regenerates the
+Meson build with the current interpreter.
 
 ## Runtime Dependencies
 
-- Python 3
+- Python 3 (3.11 or newer for the Linux jail)
 - PySide6 (Qt frontend)
 - PyGObject (`gi`, GLib/Gio bindings used by import backends/settings)
+- PyYAML (Lutris jail detection and Bottles imports; included in the Flatpak)
+- Requests and Pillow (game metadata and cover images)
 - Brotli Python module (needed for full GeForce NOW library cache decoding)
 
 Fedora:
 
 ```bash
-sudo dnf install python3-pyside6 python3-gobject
+sudo dnf install python3-pyside6 python3-gobject python3-pyyaml python3-requests python3-pillow
 ```
 
 Install the Brotli Python module from your distro packages as well if you want full GeForce NOW library imports from a source build.
@@ -114,13 +135,14 @@ Install the Brotli Python module from your distro packages as well if you want f
 Pip (user install):
 
 ```bash
-python3 -m pip install --user PySide6 Brotli
+python3 -m pip install --user PySide6 Brotli PyYAML requests Pillow
 ```
 
 Optional:
 
 - `ffprobe` for accurate splash sound duration detection
 - For source builds, make sure `python3 -c "import brotli"` works in the same Python environment that launches `./_build/klay/klay` if you want full GeForce NOW library imports instead of preview-only fallback.
+- Game jail on Linux: host Python 3.11 or newer, Bubblewrap (`bwrap`), and system Wine or a trusted Proton build. These are checked on the host, including when Klay runs as a Flatpak; Klay does not install them. See [game jail setup and limitations](docs/game-jail.md).
 
 ## CLI Options
 
@@ -154,6 +176,42 @@ Native controller access in the Flatpak requires Flatpak 1.15.6 or newer.
 - Enable/disable sources in `Preferences -> Sources`.
 - Configure source paths if your launchers are in non-default locations.
 - You can trigger an on-demand import from `Preferences -> Import -> Import Games Now`.
+
+### Run a local Windows game in a jail
+
+The optional jail runs a local Windows game offline, using a separate copy of
+its game folder and a private home folder. It also creates a separate Wine
+prefix: the Windows environment that holds settings, installed dependencies,
+and many games' saves. Your original installation and its existing prefix are
+left untouched.
+
+1. Install host Python 3.11 or newer, Bubblewrap (`bwrap`), and a trusted Wine or
+   Proton build. Klay checks these but does not install them.
+2. Edit a Lutris Windows game and enable `Run in a jail (offline)`. Wait for
+   automatic detection, then save with `OK`. Klay can resolve supported Windows
+   shortcuts too. Use `Advanced settings` if detection needs help or you are
+   setting up another local Windows game.
+3. Select `Play` and wait for the first copy and Windows environment setup.
+4. Use `View Jail Log` to inspect a launch, `Open Jail Folder` to find its files,
+   and `Stop Jail` if a running game gets stuck.
+
+The first launch needs extra disk space for the whole game, plus its new prefix
+and saves, and can take a while. Preparation cannot currently be cancelled with
+`Stop Jail`; closing Klay waits for it to finish. Later launches reuse the copy.
+Changes and saves are **not synchronized** with the original installation.
+Disabling jail mode returns to the normal launch command and keeps the jail;
+deleting the jail folder also deletes the saves inside it.
+
+Games that need online sign-in, DRM, anti-cheat, downloads, or dependencies from
+an existing prefix may not work. Compatible standard Linux gamepads connected
+before launch are supported; reconnects may require relaunching. Raw HID
+controller features and Steam Input integration are not provided.
+
+The jail reduces exposure, but shares your Linux kernel, GPU, audio, and desktop
+services. X11 can expose other desktop applications. It is not a virtual machine
+or a verdict that a game is safe, and it does not restrict Klay's own launcher
+permissions. If isolation fails, Klay stops the launch. See the
+[complete guide, including setup and known limitations](docs/game-jail.md).
 
 GeForce NOW notes:
 
@@ -282,6 +340,7 @@ Klay uses its own namespace:
 - Data: `~/.local/share/klay/`
 - Games JSON: `~/.local/share/klay/games/`
 - Covers: `~/.local/share/klay/covers/`
+- Game jails: host `~/.local/share/klay/jails/` (separate game copies, prefixes, saves, and logs)
 
 ## Troubleshooting
 

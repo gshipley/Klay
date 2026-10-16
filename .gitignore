@@ -8,5 +8,7 @@ build-aux/flatpak/page.kramo.Cartridges.json
 .DS_Store
 .prettierignore
 _build/
+.venv/
+.local-dev/
 __pycache__/
 *.pyc
