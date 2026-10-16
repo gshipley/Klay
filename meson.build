@@ -1,6 +1,6 @@
 project(
   'klay',
-  version: '0.2.6',
+  version: '0.2.7',
   meson_version: '>= 0.59.0',
   default_options: [
     'warning_level=2',
@@ -63,6 +63,22 @@ conf.set('libexecdir', libexecdir)
 
 subdir('data')
 subdir('klay')
+
+if host_machine.system() == 'linux'
+  test(
+    'game-jail',
+    py_installation,
+    args: ['-m', 'unittest', 'discover', '-s', meson.project_source_root() / 'tests'],
+    env: [
+      'PYTHONPATH=' + meson.project_build_root() + ':' + meson.project_source_root(),
+      'GSETTINGS_SCHEMA_DIR=' + meson.project_build_root() / 'data',
+      'GSETTINGS_BACKEND=memory',
+      'QT_QPA_PLATFORM=offscreen',
+    ],
+    # Opt-in live GPU, shutdown, and relaunch checks include bounded waits.
+    timeout: 360,
+  )
+endif
 
 # Runtime media/images used by the Qt UI (splash, source icons, etc.).
 install_subdir('assets', install_dir: pkgdatadir)

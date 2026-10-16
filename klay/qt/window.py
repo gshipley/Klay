@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
+from copy import deepcopy
 from functools import lru_cache
 from html import escape
 import json
@@ -79,7 +80,11 @@ from klay.qt.controller import (
     ACTION_UP,
     ControllerManager,
 )
-from klay.qt.library import GameEntry, GameLibrary
+from klay.qt.library import GameEntry, GameLibrary, JailLaunchRequired
+from klay.qt.jail_dialog import (
+    JailConfigEditor, JailFolderThread, JailGameDialog, JailReportDialog, JailReportThread,
+    JailStopThread,
+)
 from klay.qt.preferences_dialog import PreferencesDialog
 from klay.qt.settings import GENERAL_BOOL_KEYS, STATE_BOOL_KEYS, STATE_STRING_KEYS, SettingsBackend
 
@@ -92,6 +97,7 @@ ROLE_SIDEBAR_COUNT = Qt.ItemDataRole.UserRole + 5
 ROLE_SIDEBAR_HEADING = Qt.ItemDataRole.UserRole + 6
 ROLE_PLAYTIME = Qt.ItemDataRole.UserRole + 7
 ROLE_SOURCE_BADGE_PIXMAP = Qt.ItemDataRole.UserRole + 8
+ROLE_JAIL_ENABLED = Qt.ItemDataRole.UserRole + 9
 
 COVER_SIZE = QSize(200, 300)
 BIG_PICTURE_COVER_SIZE = QSize(280, 420)
@@ -710,6 +716,24 @@ class GameCardDelegate(QStyledItemDelegate):
         if isinstance(cover, QPixmap):
             painter.drawPixmap(cover_rect, cover)
 
+        if index.data(ROLE_JAIL_ENABLED):
+            badge_font = self._meta_font(option.font)
+            badge_font.setBold(True)
+            badge_metrics = QFontMetrics(badge_font)
+            jail_rect = QRect(
+                cover_rect.left() + 8,
+                cover_rect.top() + 8,
+                badge_metrics.horizontalAdvance("Jail") + 18,
+                badge_metrics.height() + 10,
+            )
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#243849"))
+            painter.drawRoundedRect(jail_rect, 5, 5)
+            painter.setFont(badge_font)
+            painter.setPen(QColor("#ffffff"))
+            painter.drawText(jail_rect, Qt.AlignmentFlag.AlignCenter, "Jail")
+            painter.setFont(option.font)
+
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(title_background)
         painter.drawRect(title_rect)
@@ -1010,6 +1034,24 @@ class WorkerProgressDialog(QDialog):
             self.details_view.appendPlainText(detail_line)
 
 
+class JailLaunchThread(QThread):
+    """Prepare the host jail without blocking Qt's event loop."""
+
+    def __init__(self, library: GameLibrary, game: GameEntry, parent=None) -> None:
+        super().__init__(parent)
+        self.library = library
+        self.game = GameEntry(path=game.path, data=deepcopy(game.data))
+        self.game._persisted = game._persisted
+        self.process: subprocess.Popen[Any] | None = None
+        self.error = ""
+
+    def run(self) -> None:
+        try:
+            self.process = self.library.launch(self.game)
+        except Exception as error:
+            self.error = str(error)
+
+
 class ImportWorkerThread(QThread):
     completed = Signal(dict)
     failed = Signal(str)
@@ -1166,6 +1208,18 @@ class KlayMainWindow(QMainWindow):
         self.import_progress_dialog: WorkerProgressDialog | None = None
         self.launch_feedback_dialog: QDialog | None = None
         self.launch_feedback_timer: QTimer | None = None
+        self.jail_launch_thread: JailLaunchThread | None = None
+        self._close_after_jail_work = False
+        self._jail_processes: dict[str, tuple[GameEntry, subprocess.Popen[Any]]] = {}
+        self._jail_report_workers: dict[JailReportThread, tuple[GameEntry, int]] = {}
+        self._jail_folder_workers: set[JailFolderThread] = set()
+        self._jail_stop_workers: set[JailStopThread] = set()
+        self._jail_requested_stops: set[str] = set()
+        self._jail_log_dialogs: list[JailReportDialog] = []
+        self._jail_game_dialogs: list[JailGameDialog] = []
+        self._jail_monitor_timer = QTimer(self)
+        self._jail_monitor_timer.setInterval(1000)
+        self._jail_monitor_timer.timeout.connect(self._poll_jail_processes)
         self.last_import_session: ImportSession | None = None
         self._close_after_import_cancel = False
         self._geforcenow_process: subprocess.Popen[Any] | None = None
@@ -1571,6 +1625,25 @@ class KlayMainWindow(QMainWindow):
         )
         right.addWidget(self.details_executable)
 
+        self.details_jail_label = QLabel()
+        self.details_jail_label.setWordWrap(True)
+        self.details_jail_label.setTextFormat(Qt.TextFormat.PlainText)
+        right.addWidget(self.details_jail_label)
+        self.details_jail_actions = QWidget()
+        jail_actions_layout = QHBoxLayout(self.details_jail_actions)
+        jail_actions_layout.setContentsMargins(0, 0, 0, 0)
+        jail_log_button = QPushButton("View Jail Log")
+        jail_log_button.clicked.connect(self.view_active_jail_log)
+        jail_actions_layout.addWidget(jail_log_button)
+        jail_folder_button = QPushButton("Open Jail Folder")
+        jail_folder_button.clicked.connect(self.open_active_jail_folder)
+        jail_actions_layout.addWidget(jail_folder_button)
+        self.details_jail_stop_button = QPushButton("Stop Jail")
+        self.details_jail_stop_button.clicked.connect(self.stop_active_jail)
+        jail_actions_layout.addWidget(self.details_jail_stop_button)
+        jail_actions_layout.addStretch(1)
+        right.addWidget(self.details_jail_actions)
+
         button_row = QHBoxLayout()
         self.details_play_btn = QPushButton("Play")
         self._details_play_normal_font = QFont(self.details_play_btn.font())
@@ -1931,6 +2004,20 @@ class KlayMainWindow(QMainWindow):
         self.runtime_settings.set_state_bool("show-sidebar", sidebar_visible)
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        if (
+            self.jail_launch_thread is not None or self._jail_report_workers
+            or self._jail_folder_workers or self._jail_stop_workers
+            or any(dialog.worker is not None for dialog in self._jail_log_dialogs)
+            or any(dialog.detecting for dialog in self._jail_game_dialogs)
+        ):
+            self._close_after_jail_work = True
+            for dialog in self._jail_log_dialogs:
+                dialog.reject()
+            for dialog in self._jail_game_dialogs:
+                dialog.reject()
+            self.statusBar().showMessage("Klay will close when the jail operation finishes.")
+            event.ignore()
+            return
         if self.import_thread is not None and self.import_thread.isRunning():
             answer = QMessageBox.question(
                 self,
@@ -1945,6 +2032,7 @@ class KlayMainWindow(QMainWindow):
             return
 
         self._stop_geforcenow_autoclose_monitor()
+        self._jail_monitor_timer.stop()
         self.controller_manager.stop()
         self._save_state()
         super().closeEvent(event)
@@ -2845,7 +2933,8 @@ class KlayMainWindow(QMainWindow):
             item.setData(ROLE_COVER_PIXMAP, self._game_cover(game))
             item.setData(ROLE_PLAYTIME, _fmt_playtime_minutes(game.playtime_minutes))
             item.setData(ROLE_SOURCE_BADGE_PIXMAP, _game_card_badge_pixmap(game))
-            item.setToolTip(game.name)
+            item.setData(ROLE_JAIL_ENABLED, game.jail_enabled)
+            item.setToolTip(game.name + ("\nJail enabled (offline)" if game.jail_enabled else ""))
             self.games_list.addItem(item)
             self._attach_cover_animation(game, item)
 
@@ -3662,19 +3751,73 @@ class KlayMainWindow(QMainWindow):
         parent_rect = self.frameGeometry()
         dialog_rect = dialog.frameGeometry()
         dialog.move(parent_rect.center() - dialog_rect.center())
+        self.launch_feedback_dialog = dialog
+        dialog.destroyed.connect(lambda: self._launch_feedback_destroyed(dialog))
         dialog.show()
         QApplication.processEvents()
-        self.launch_feedback_dialog = dialog
+
+    def _launch_feedback_destroyed(self, dialog) -> None:
+        if self.launch_feedback_dialog is dialog:
+            self.launch_feedback_dialog = None
 
     def launch_game(self, game: GameEntry) -> bool:
+        if self.jail_launch_thread is not None:
+            self.statusBar().showMessage("A jail is being prepared. Wait for it to finish.")
+            return False
         try:
-            process = self.library.launch(game)
+            self.library.refresh_launch_entry(game)
+        except OSError as error:
+            self._close_launch_feedback()
+            self._show_error("Launch Failed", str(error))
+            return False
+        if game.jail_enabled:
+            if self._jail_stop_pending(game.game_id):
+                self.statusBar().showMessage(f"Stopping the jail for {game.name}. Wait for it to finish.")
+                self._close_launch_feedback()
+                return False
+            running = self._jail_processes.get(game.game_id)
+            if running is not None:
+                if running[1].poll() is None:
+                    self.statusBar().showMessage(
+                        f"{game.name} is already running in its jail. Use Stop Jail before playing again."
+                    )
+                else:
+                    self._poll_jail_processes()
+                    self.statusBar().showMessage(f"Checking the previous jail run for {game.name}…")
+                self._close_launch_feedback()
+                return False
+            if any(
+                previous.game_id == game.game_id
+                for previous, _exit_code in self._jail_report_workers.values()
+            ):
+                self.statusBar().showMessage(f"Checking the previous jail run for {game.name}…")
+                self._close_launch_feedback()
+                return False
+            worker = JailLaunchThread(self.library, game, self)
+            self.jail_launch_thread = worker
+            worker.finished.connect(self._on_jail_launch_finished)
+            self._show_launch_feedback(f"{game.name} in its jail (first launch copies the game)")
+            self.details_play_btn.setEnabled(False)
+            self._update_jail_stop_control()
+            self.statusBar().showMessage(f"Preparing the offline jail for {game.name}…")
+            worker.start()
+            return True
+
+        try:
+            process = self.library.launch(game, allow_jail=False)
+        except JailLaunchRequired:
+            # A save enabled isolation after the UI selected its ordinary path.
+            # Re-enter dispatch with the refreshed entry to prepare off-thread.
+            return self.launch_game(game)
         except OSError as error:
             self._close_launch_feedback()
             self._show_error("Launch Failed", str(error))
             return False
 
-        if game.base_source == "geforcenow" and (
+        return self._finish_game_launch(game, process)
+
+    def _finish_game_launch(self, game: GameEntry, process: subprocess.Popen[Any]) -> bool:
+        if not game.jail_enabled and game.base_source == "geforcenow" and (
             self._geforcenow_autoclose_enabled() or self.launch_feedback_dialog is not None
         ):
             self._start_geforcenow_autoclose_monitor(process)
@@ -3686,6 +3829,194 @@ class KlayMainWindow(QMainWindow):
             return True
         self.reload_games()
         return True
+
+    def _on_jail_launch_finished(self) -> None:
+        worker = self.jail_launch_thread
+        if worker is None:
+            return
+        self.jail_launch_thread = None
+        game, process, error = worker.game, worker.process, worker.error
+        worker.deleteLater()
+        self._close_launch_feedback()
+        if error or process is None:
+            self.statusBar().showMessage(f"Jail launch failed for {game.name}.")
+            if not self._close_after_jail_work:
+                message = error or "The jail helper did not start."
+                if "already running" in message.lower():
+                    message += "\n\nUse Stop Jail in the game details or its right-click menu, then try Play again."
+                self._show_error(
+                    "Jail Launch Failed",
+                    message
+                    + "\n\nUse View Jail Log for the jail status and log.",
+                )
+        else:
+            if game.jail_enabled:
+                self._jail_processes[game.game_id] = (game, process)
+                self._jail_monitor_timer.start()
+            self._finish_game_launch(game, process)
+            warning = str(getattr(process, "jail_warning", "") or "")
+            if warning:
+                self.statusBar().showMessage(f"Launched {game.name}. {warning}")
+        self._update_jail_stop_control()
+        if self._close_after_jail_work and not self._jail_report_workers:
+            self.close()
+
+    def _poll_jail_processes(self) -> None:
+        for game_id, (game, process) in list(self._jail_processes.items()):
+            # Wait for the stop result before interpreting a signal-driven exit.
+            if self._jail_stop_pending(game_id):
+                continue
+            exit_code = process.poll()
+            if exit_code is None:
+                continue
+            del self._jail_processes[game_id]
+            worker = JailReportThread(self.library, game, self)
+            self._jail_report_workers[worker] = (game, exit_code)
+            worker.finished.connect(self._on_jail_supervision_report_ready)
+            worker.start()
+        if not self._jail_processes:
+            self._jail_monitor_timer.stop()
+
+    def _on_jail_supervision_report_ready(self) -> None:
+        worker = self.sender()
+        if not isinstance(worker, JailReportThread):
+            return
+        game_and_exit = self._jail_report_workers.pop(worker, None)
+        if game_and_exit is None:
+            return
+        game, exit_code = game_and_exit
+        report = worker.report
+        worker.deleteLater()
+        requested_stop = (
+            game.game_id in self._jail_requested_stops or report.get("status") == "stopped"
+        )
+        self._jail_requested_stops.discard(game.game_id)
+        if requested_stop:
+            self.statusBar().showMessage(f"Stopped the jail for {game.name}.")
+        elif report.get("status") == "failed" or exit_code != 0:
+            message = str(report.get("error") or f"The jail helper exited with code {exit_code}.")
+            if report.get("log_path"):
+                message += f"\n\nLog: {report['log_path']}"
+            message += "\n\nUse View Jail Log for details."
+            self.statusBar().showMessage(f"The jail for {game.name} stopped with an error.")
+            if not self._close_after_jail_work:
+                self._show_error(f"Jail stopped — {game.name}", message)
+        else:
+            self.statusBar().showMessage(f"{game.name} exited its jail.")
+        self._update_jail_stop_control()
+        if self._close_after_jail_work and not self._jail_report_workers and self.jail_launch_thread is None:
+            self.close()
+
+    def view_jail_log(self, game: GameEntry) -> None:
+        dialog = JailReportDialog(self.library, game, self)
+        self._jail_log_dialogs.append(dialog)
+        try:
+            dialog.exec()
+        finally:
+            self._jail_log_dialogs.remove(dialog)
+            dialog.deleteLater()
+        if (
+            self._close_after_jail_work and self.jail_launch_thread is None
+            and not self._jail_report_workers
+        ):
+            self.close()
+
+    def view_active_jail_log(self) -> None:
+        game = self.active_game()
+        if game is not None:
+            self.view_jail_log(game)
+
+    def open_jail_folder(self, game: GameEntry) -> None:
+        if any(worker.game.game_id == game.game_id for worker in self._jail_folder_workers):
+            self.statusBar().showMessage(f"Opening the jail folder for {game.name}…")
+            return
+        snapshot = GameEntry(path=game.path, data=deepcopy(game.data))
+        worker = JailFolderThread(self.library, snapshot, self)
+        self._jail_folder_workers.add(worker)
+        worker.finished.connect(self._on_jail_folder_opened)
+        self.statusBar().showMessage(f"Opening the jail folder for {game.name}…")
+        worker.start()
+
+    def _on_jail_folder_opened(self) -> None:
+        worker = self.sender()
+        if not isinstance(worker, JailFolderThread):
+            return
+        self._jail_folder_workers.discard(worker)
+        game, error = worker.game, worker.error
+        worker.deleteLater()
+        if error:
+            self.statusBar().showMessage(f"Could not open the jail folder for {game.name}.")
+            if not self._close_after_jail_work:
+                self._show_error("Cannot Open Jail Folder", error)
+        else:
+            self.statusBar().showMessage(f"Opened the jail folder for {game.name}.")
+        if (
+            self._close_after_jail_work and self.jail_launch_thread is None
+            and not self._jail_report_workers and not self._jail_folder_workers
+        ):
+            self.close()
+
+    def open_active_jail_folder(self) -> None:
+        game = self.active_game()
+        if game is not None:
+            self.open_jail_folder(game)
+
+    def _jail_stop_pending(self, game_id: str) -> bool:
+        return any(worker.game.game_id == game_id for worker in self._jail_stop_workers)
+
+    def _update_jail_stop_control(self) -> None:
+        game = self.active_game()
+        stopping = game is not None and self._jail_stop_pending(game.game_id)
+        preparing = (
+            game is not None and self.jail_launch_thread is not None
+            and self.jail_launch_thread.game.game_id == game.game_id
+        )
+        self.details_jail_stop_button.setText("Stopping…" if stopping else "Stop Jail")
+        self.details_jail_stop_button.setEnabled(game is not None and not stopping and not preparing)
+
+    def stop_jail(self, game: GameEntry) -> None:
+        if self._jail_stop_pending(game.game_id):
+            self.statusBar().showMessage(f"Stopping the jail for {game.name}…")
+            return
+        if self.jail_launch_thread is not None and self.jail_launch_thread.game.game_id == game.game_id:
+            self.statusBar().showMessage("Wait for the jail to finish preparing before stopping it.")
+            return
+        worker = JailStopThread(self.library, game, self)
+        self._jail_stop_workers.add(worker)
+        worker.finished.connect(self._on_jail_stopped)
+        self.statusBar().showMessage(f"Stopping the jail for {game.name}…")
+        self._update_jail_stop_control()
+        worker.start()
+
+    def _on_jail_stopped(self) -> None:
+        worker = self.sender()
+        if not isinstance(worker, JailStopThread):
+            return
+        self._jail_stop_workers.discard(worker)
+        game, error, result = worker.game, worker.error, worker.result
+        worker.deleteLater()
+        if error:
+            self.statusBar().showMessage(f"Could not stop the jail for {game.name}.")
+            if not self._close_after_jail_work:
+                self._show_error("Cannot Stop Jail", error)
+        else:
+            if result.get("status") == "stopped":
+                if game.game_id in self._jail_processes:
+                    self._jail_requested_stops.add(game.game_id)
+                self.statusBar().showMessage(f"Stopped the jail for {game.name}.")
+            else:
+                self.statusBar().showMessage(f"The jail for {game.name} is not running.")
+        # Keep the process and lock checks in the launch path until the helper
+        # actually exits, even after the host acknowledged a stop request.
+        self._poll_jail_processes()
+        self._update_jail_stop_control()
+        if self._close_after_jail_work:
+            self.close()
+
+    def stop_active_jail(self) -> None:
+        game = self.active_game()
+        if game is not None:
+            self.stop_jail(game)
 
     def _push_undo(self, game: GameEntry, field: str, previous: bool) -> None:
         self.undo_stack.append(UndoEntry(game_id=game.game_id, field=field, previous=previous))
@@ -3782,10 +4113,10 @@ class KlayMainWindow(QMainWindow):
         *,
         title: str,
         game: GameEntry | None = None,
-    ) -> tuple[str, str, str, Path | None] | None:
-        dialog = QDialog(self)
+    ) -> tuple[str, str, str, Path | None, dict[str, Any]] | None:
+        dialog = JailGameDialog(self)
         dialog.setWindowTitle(title)
-        dialog.setMinimumWidth(460)
+        dialog.setMinimumWidth(600)
 
         layout = QVBoxLayout(dialog)
         form = QFormLayout()
@@ -3820,6 +4151,12 @@ class KlayMainWindow(QMainWindow):
         form.addRow("Developer", developer_edit)
         form.addRow("Cover", cover_row)
 
+        jail_editor = JailConfigEditor(
+            game.jail_config if game else None, dialog, library=self.library, game=game,
+        )
+        dialog.set_jail_editor(jail_editor)
+        layout.addWidget(jail_editor)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -3828,36 +4165,61 @@ class KlayMainWindow(QMainWindow):
         ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
 
         def validate() -> None:
-            ok_button.setEnabled(bool(name_edit.text().strip() and executable_edit.text().strip()))
+            try:
+                jail = jail_editor.configuration()
+            except ValueError:
+                valid_jail = False
+                jail = {"enabled": jail_editor.enabled.isChecked()}
+            else:
+                valid_jail = True
+            executable_edit.setEnabled(not jail.get("enabled"))
+            ok_button.setEnabled(bool(
+                name_edit.text().strip()
+                and valid_jail
+                and (jail.get("enabled") or executable_edit.text().strip())
+            ))
 
         name_edit.textChanged.connect(validate)
         executable_edit.textChanged.connect(validate)
+        jail_editor.changed.connect(validate)
         validate()
 
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
 
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        self._jail_game_dialogs.append(dialog)
+        try:
+            result = dialog.exec()
+        finally:
+            self._jail_game_dialogs.remove(dialog)
+        if self._close_after_jail_work:
+            self.close()
+        if result != QDialog.DialogCode.Accepted:
+            dialog.deleteLater()
             return None
 
         cover_path = Path(cover_edit.text()) if cover_edit.text().strip() else None
-        return (
+        values = (
             name_edit.text().strip(),
             executable_edit.text().strip(),
             developer_edit.text().strip(),
             cover_path,
+            jail_editor.configuration(),
         )
+        dialog.deleteLater()
+        return values
 
     def add_game(self) -> None:
         result = self._game_form_dialog(title="Add Game")
         if not result:
             return
-        name, executable, developer, cover_path = result
+        name, executable, developer, cover_path, jail = result
         self.library.add_manual_game(
             name=name,
             executable=executable,
             developer=developer,
             cover_source=cover_path,
+            jail=jail,
         )
         self.reload_games()
 
@@ -3865,13 +4227,14 @@ class KlayMainWindow(QMainWindow):
         result = self._game_form_dialog(title="Edit Game", game=game)
         if not result:
             return
-        name, executable, developer, cover_path = result
+        name, executable, developer, cover_path, jail = result
         self.library.update_manual_game(
             game,
             name=name,
             executable=executable,
             developer=developer,
             cover_source=cover_path,
+            jail=jail,
         )
         self.reload_games()
 
@@ -3991,6 +4354,9 @@ class KlayMainWindow(QMainWindow):
         self.details_play_btn.setEnabled(False)
         self._show_launch_feedback(game.name)
         launched = self.launch_game(game)
+        if launched and game.jail_enabled:
+            # The preparation worker closes this feedback after actual readiness.
+            return
         if launched:
             if game.base_source == "geforcenow":
                 self._launch_feedback_waiting_for_geforcenow = True
@@ -4597,7 +4963,20 @@ class KlayMainWindow(QMainWindow):
         self.details_website.setVisible(bool(game.website))
         self.details_added.setText(f"Added: {_fmt_timestamp(game.added)}")
         self.details_last_played.setText(f"Last played: {_fmt_timestamp(game.last_played)}")
+        self.details_executable_heading.setText(
+            "Normal launcher command (bypassed)" if game.jail_enabled else "Executable"
+        )
         self.details_executable.setText(game.executable_text() or "-")
+        jail = game.jail_config
+        self.details_jail_label.setText(
+            "Jail enabled · offline · separate game copy, prefix and saves\n"
+            f"Game .exe: {jail.get('exe', '')}\n"
+            f"Runner: {jail.get('runner_type', '')} · {jail.get('runner', '')}"
+            if game.jail_enabled else ""
+        )
+        self.details_jail_label.setVisible(game.jail_enabled)
+        self.details_jail_actions.setVisible(game.jail_enabled or bool(jail.get("game_dir")))
+        self._update_jail_stop_control()
         self.details_hide_btn.setText("Unhide" if game.hidden else "Hide")
 
         if self.details_cover_movie is not None:
@@ -4645,6 +5024,14 @@ class KlayMainWindow(QMainWindow):
         menu.addAction("Play", lambda: self.launch_game(game))
         menu.addAction("Details", lambda: self.open_game_details(game))
         menu.addAction("Edit", lambda: self.edit_game(game))
+        if game.jail_enabled or game.jail_config.get("game_dir"):
+            menu.addAction("View Jail Log", lambda: self.view_jail_log(game))
+            menu.addAction("Open Jail Folder", lambda: self.open_jail_folder(game))
+            stop_action = menu.addAction("Stop Jail", lambda: self.stop_jail(game))
+            stop_action.setEnabled(
+                not self._jail_stop_pending(game.game_id)
+                and not (self.jail_launch_thread is not None and self.jail_launch_thread.game.game_id == game.game_id)
+            )
         menu.addAction("Categories...", lambda: self.edit_game_categories(game))
         menu.addAction("Unhide" if game.hidden else "Hide", lambda: self.toggle_hide_game(game))
         menu.addAction("Remove", lambda: self.remove_game(game))

@@ -30,6 +30,7 @@ except ModuleNotFoundError:
     ImageSequence = None  # type: ignore[assignment]
 
 from klay.qt.settings import SettingsBackend
+from klay.qt.game_storage import update_game_file
 
 
 COVER_SIZE = (200, 300)
@@ -557,22 +558,22 @@ def _source_enabled(settings: SettingsBackend, source_id: str) -> bool:
 
 
 def _write_game(games_dir: Path, data: dict[str, Any]) -> None:
-    games_dir.mkdir(parents=True, exist_ok=True)
     game_path = games_dir / f"{data['game_id']}.json"
-    _normalize_metadata_fields(data)
-    with tempfile.NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        dir=str(games_dir),
-        prefix=f"{data['game_id']}.",
-        suffix=".tmp",
-        delete=False,
-    ) as open_file:
-        json.dump(data, open_file, sort_keys=True)
-        open_file.flush()
-        os.fsync(open_file.fileno())
-        tmp_path = Path(open_file.name)
-    os.replace(tmp_path, game_path)
+
+    def merge(current):
+        result = dict(data)
+        if current is not None:
+            # Imports may have spent minutes scanning or enriching their stale
+            # snapshot. User choices, especially isolation, belong to the UI.
+            for key in ("jail", "hidden", "categories", "last_played"):
+                if key in current:
+                    result[key] = current[key]
+                else:
+                    result.pop(key, None)
+        _normalize_metadata_fields(result)
+        return result
+
+    update_game_file(game_path, merge)
 
 
 def _apply_steam_metadata(target: dict[str, Any], online_data: dict[str, Any]) -> bool:
@@ -1670,6 +1671,10 @@ def _run_import() -> dict[str, Any]:
                     game_data["hidden"] = bool(existing.get("hidden", False))
                     game_data["added"] = int(existing.get("added", game_data["added"]))
                     game_data["categories"] = list(existing.get("categories", []) or [])
+                # Imported titles can change while keeping their game ID. A
+                # renamed/re-added entry must not lose its isolation setting.
+                if "jail" in existing:
+                    game_data["jail"] = existing["jail"]
                 game_data["removed"] = False
 
             _apply_store(game_data, additional_data.get("store"))

@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Keep development tools in the checkout and run against the host graphics stack.
+set -euo pipefail
+
+project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# A Toolbox/Distrobox /usr can have a different graphics driver from the desktop.
+# Build and run on the native host, using its Python, Qt and GI packages.
+if [[ -d /run/host/usr && -x /usr/bin/host-spawn ]]; then
+    exec /usr/bin/host-spawn -no-pty -cwd "$project_dir" \
+        -env TERM,DISPLAY,WAYLAND_DISPLAY,XAUTHORITY,XDG_RUNTIME_DIR,QT_QPA_PLATFORM,KLAY_LIVE_JAIL_TESTS \
+        "$project_dir/build-aux/dev" "$@"
+fi
+
+cd -- "$project_dir"
+action="${1:-run}"
+if [[ $# -gt 0 ]]; then
+    shift
+fi
+venv_dir="$project_dir/.venv"
+export PATH="$venv_dir/bin:$PATH"
+
+check_runtime() {
+    "$venv_dir/bin/python" - <<'PY'
+import importlib.util
+import sys
+
+modules = ("PySide6", "gi", "requests", "yaml", "PIL")
+missing = [name for name in modules if importlib.util.find_spec(name) is None]
+if missing:
+    sys.exit("Missing host Python packages: " + ", ".join(missing)
+             + ". See the native dependencies in README.md.")
+PY
+}
+
+require_setup() {
+    if [[ ! -x "$venv_dir/bin/meson" || ! -x "$venv_dir/bin/ninja" ]]; then
+        printf '%s\n' 'Run ./build-aux/dev setup once before building or running.' >&2
+        exit 1
+    fi
+    check_runtime
+}
+
+case "$action" in
+    setup)
+        # Recreate only this script's environment so moved checkouts and host
+        # Python upgrades cannot retain entry points for an old interpreter.
+        /usr/bin/python3 -m venv --clear --system-site-packages "$venv_dir"
+        "$venv_dir/bin/python" -m pip install -r build-aux/dev-requirements.txt
+        check_runtime
+        setup_options=()
+        if [[ -f _build/meson-private/coredata.dat ]]; then
+            setup_options+=(--wipe)
+        fi
+        "$venv_dir/bin/meson" setup "${setup_options[@]}" _build \
+            --prefix "$project_dir/.local-dev" -Dprofile=development
+        "$venv_dir/bin/meson" compile -C _build
+        ;;
+    build)
+        require_setup
+        "$venv_dir/bin/meson" compile -C _build "$@"
+        ;;
+    run)
+        require_setup
+        "$venv_dir/bin/meson" compile -C _build
+        exec "$venv_dir/bin/python" _build/klay/klay "$@"
+        ;;
+    test)
+        require_setup
+        "$venv_dir/bin/meson" compile -C _build
+        glib-compile-schemas _build/data
+        export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
+        export GSETTINGS_BACKEND=memory
+        export GSETTINGS_SCHEMA_DIR="$project_dir/_build/data"
+        export PYTHONPATH="$project_dir/_build:$project_dir${PYTHONPATH:+:$PYTHONPATH}"
+        exec "$venv_dir/bin/meson" test -C _build --print-errorlogs "$@"
+        ;;
+    *)
+        printf '%s\n' 'Usage: ./build-aux/dev {setup|build|run [Klay options]|test [Meson test options]}' >&2
+        exit 2
+        ;;
+esac

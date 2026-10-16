@@ -17,6 +17,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Jail tests
+        run: python3 -m unittest discover -s tests -v
+        env:
+          QT_QPA_PLATFORM: offscreen
+
       - name: Flatpak Builder
         uses: flatpak/flatpak-github-actions/flatpak-builder@v6.5
         with:

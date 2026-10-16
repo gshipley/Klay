@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from copy import deepcopy
 from datetime import datetime, timezone
 import json
 import os
@@ -10,12 +11,15 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from time import time
 from typing import Any
 from urllib.parse import quote
 import webbrowser
+
+from klay.qt import jail
+from klay.qt.game_storage import read_game_file, update_game_file
 try:
     import requests
 except ModuleNotFoundError:
@@ -27,10 +31,20 @@ except ModuleNotFoundError:
     ImageOps = None  # type: ignore[assignment]
 
 
+class JailLaunchRequired(OSError):
+    """The current entry needs asynchronous jail preparation."""
+
+
 @dataclass
 class GameEntry:
     path: Path
     data: dict[str, Any]
+    _saved_data: dict[str, Any] = field(init=False, repr=False, compare=False)
+    _dirty_fields: set[str] = field(default_factory=set, init=False, repr=False, compare=False)
+    _persisted: bool = field(default=False, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        self._saved_data = deepcopy(self.data)
 
     @property
     def game_id(self) -> str:
@@ -172,8 +186,26 @@ class GameEntry:
         executable = self.executable
         return shlex.join(executable) if isinstance(executable, list) else executable
 
+    @property
+    def jail_config(self) -> dict[str, Any]:
+        if "jail" not in self.data:
+            return {}
+        config = self.data["jail"]
+        if not isinstance(config, dict):
+            # Corrupt isolation settings must never silently become a normal launch.
+            return {"enabled": True, "invalid": True}
+        if "enabled" not in config:
+            return {**config, "enabled": True, "invalid": True}
+        return dict(config)
+
+    @property
+    def jail_enabled(self) -> bool:
+        enabled = self.jail_config.get("enabled", False)
+        return enabled if isinstance(enabled, bool) else True
+
     def set_value(self, key: str, value: Any) -> None:
         self.data[key] = value
+        self._dirty_fields.add(key)
 
 
 class GameLibrary:
@@ -282,21 +314,6 @@ class GameLibrary:
             normalized["playtime_minutes"] = None
         return normalized
 
-    def _atomic_write_json(self, path: Path, data: dict[str, Any]) -> None:
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            dir=str(path.parent),
-            prefix=f"{path.stem}.",
-            suffix=".tmp",
-            delete=False,
-        ) as open_file:
-            json.dump(data, open_file, sort_keys=True)
-            open_file.flush()
-            os.fsync(open_file.fileno())
-            tmp_path = Path(open_file.name)
-        os.replace(tmp_path, path)
-
     def load_games(
         self, *, include_removed: bool = False, include_blacklisted: bool = False
     ) -> list[GameEntry]:
@@ -317,14 +334,36 @@ class GameLibrary:
                 continue
             if not include_blacklisted and data.get("blacklisted"):
                 continue
-            games.append(GameEntry(path=path, data=data))
+            game = GameEntry(path=path, data=data)
+            game._persisted = True
+            games.append(game)
 
         games.sort(key=lambda game: game.name.lower())
         return games
 
-    def save_game(self, game: GameEntry) -> None:
-        game.data = self._normalize_game_data(game.data)
-        self._atomic_write_json(game.path, game.data)
+    def save_game(self, game: GameEntry, *, existing_only: bool = False) -> None:
+        changed = game._dirty_fields | {
+            key for key in game.data.keys() | game._saved_data.keys()
+            if (key in game.data) != (key in game._saved_data)
+            or game.data.get(key) != game._saved_data.get(key)
+        }
+
+        def merge(current):
+            if current is None:
+                return self._normalize_game_data(deepcopy(game.data))
+            for key in changed:
+                if key in game.data:
+                    current[key] = deepcopy(game.data[key])
+                else:
+                    current.pop(key, None)
+            return self._normalize_game_data(current)
+
+        stored = update_game_file(game.path, merge, existing_only=existing_only)
+        if stored is not None:
+            game.data = stored
+            game._saved_data = deepcopy(stored)
+            game._dirty_fields.clear()
+            game._persisted = True
 
     def cover_path(self, game: GameEntry) -> Path | None:
         if not self.covers_dir.is_dir():
@@ -529,6 +568,7 @@ class GameLibrary:
         executable: str,
         developer: str = "",
         cover_source: Path | None = None,
+        jail: dict[str, Any] | None = None,
     ) -> GameEntry:
         timestamp = int(time())
         game_id = self.next_imported_game_id()
@@ -557,6 +597,8 @@ class GameLibrary:
             "version": 1.5,
         }
         path = self.games_dir / f"{game_id}.json"
+        if jail is not None:
+            data["jail"] = dict(jail)
         game = GameEntry(path=path, data=data)
         self.save_game(game)
         self.set_cover(game, cover_source)
@@ -570,10 +612,20 @@ class GameLibrary:
         executable: str,
         developer: str = "",
         cover_source: Path | None = None,
+        jail: dict[str, Any] | None = None,
     ) -> None:
+        # A dialog can stay open while a jail starts or an import refreshes the
+        # entry. Keep fields that the dialog does not edit from the latest file.
+        current = self.load_game_by_id(game.game_id, include_removed=True)
+        if current is not None:
+            game.data = current.data
+            game._saved_data = deepcopy(current.data)
+            game._dirty_fields.clear()
         game.set_value("name", name)
         game.set_value("executable", executable)
         game.set_value("developer", developer or None)
+        if jail is not None:
+            game.set_value("jail", dict(jail))
         self.save_game(game)
         if cover_source is not None:
             self.set_cover(game, cover_source)
@@ -601,11 +653,23 @@ class GameLibrary:
         data = self._normalize_game_data(data)
         if not include_removed and data.get("removed"):
             return None
-        return GameEntry(path=path, data=data)
+        game = GameEntry(path=path, data=data)
+        game._persisted = True
+        return game
 
     def mark_played(self, game: GameEntry) -> None:
-        game.data["last_played"] = int(time())
-        self.save_game(game)
+        timestamp = int(time())
+        game.data["last_played"] = timestamp
+        # Jail preparation can take minutes. Apply the timestamp to the current
+        # entry so edits/imports made during preparation are not overwritten by
+        # the launch worker's snapshot (and a deleted entry is not resurrected).
+        current = self.load_game_by_id(game.game_id, include_removed=True)
+        if current is not None:
+            current.data["last_played"] = timestamp
+            self.save_game(current, existing_only=True)
+            if current._saved_data.get("last_played") == timestamp:
+                game._saved_data["last_played"] = timestamp
+                game._dirty_fields.discard("last_played")
 
     @staticmethod
     def _is_flatpak_sandbox() -> bool:
@@ -625,7 +689,38 @@ class GameLibrary:
             "/usr/bin/flatpak-spawn --host "
         )
 
-    def launch(self, game: GameEntry) -> subprocess.Popen[Any]:
+    def refresh_launch_entry(self, game: GameEntry) -> None:
+        current = read_game_file(game.path)
+        if current is None:
+            if game._persisted:
+                raise OSError("This game entry was deleted. Refresh the library before launching it.")
+            return
+        if str(current.get("game_id") or "") != game.game_id:
+            raise OSError("The saved game identity changed. Refresh the library before launching it.")
+        game.data = self._normalize_game_data(current)
+        game._saved_data = deepcopy(game.data)
+        game._dirty_fields.clear()
+        game._persisted = True
+
+    def launch(self, game: GameEntry, *, allow_jail: bool = True) -> subprocess.Popen[Any]:
+        self.refresh_launch_entry(game)
+        if game.jail_enabled:
+            if not allow_jail:
+                raise JailLaunchRequired("The saved game now requires jail preparation.")
+            process = jail.launch_game(
+                game.jail_config, game_id=game.game_id,
+                data_dir_name=self.data_dir_name,
+            )
+            try:
+                self.mark_played(game)
+            except OSError as error:
+                # The runner has already started. Return its supervisor even
+                # when play-history storage fails, so callers retain control.
+                process.jail_warning = f"Game started, but play history could not be saved: {error}"
+            except BaseException:
+                jail.stop_game(process)
+                raise
+            return process
         executable = game.executable
         process: subprocess.Popen[Any]
         if isinstance(executable, list):
@@ -651,6 +746,40 @@ class GameLibrary:
 
         self.mark_played(game)
         return process
+
+    def check_jail(self, game: GameEntry) -> dict[str, Any]:
+        return jail.check_game(
+            game.jail_config, game_id=game.game_id,
+            data_dir_name=self.data_dir_name,
+        )
+
+    def stop_jail(self, game: GameEntry) -> dict[str, Any]:
+        return jail.stop_jail(game.jail_config, game_id=game.game_id, data_dir_name=self.data_dir_name)
+
+    def detect_jail_config(self, game: GameEntry) -> dict[str, Any]:
+        """Resolve an imported game's installed files without launching its source."""
+        if game.base_source != "lutris":
+            raise jail.JailError("Automatic setup is available for Lutris games. Choose the game files in Advanced settings.")
+        from klay.qt.lutris_jail import LutrisJailError, resolve_lutris_jail
+        from klay.qt.settings import SettingsBackend
+
+        settings = SettingsBackend(data_dir_name=self.data_dir_name)
+        try:
+            return resolve_lutris_jail(
+                game.data, lutris_location=settings.get_string("lutris-location"),
+            )
+        except (LutrisJailError, OSError) as error:
+            raise jail.JailError(str(error)) from error
+
+    def jail_report(self, game: GameEntry) -> dict[str, Any]:
+        return jail.game_report(
+            game.jail_config, game_id=game.game_id,
+            data_dir_name=self.data_dir_name,
+        )
+
+    def open_jail_folder(self, game: GameEntry) -> None:
+        report = self.jail_report(game)
+        jail.open_folder(str(report.get("jail_dir") or ""))
 
     def open_web_search(self, game: GameEntry, engine: str) -> bool:
         url = self.SEARCH_ENGINES.get(engine)

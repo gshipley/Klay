@@ -17,4 +17,21 @@
   <launchable type="desktop-id">@APP_ID@.desktop</launchable>
   <translation type="gettext">@GETTEXT_DOMAIN@</translation>
   <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.2.7" date="2026-10-16">
+      <description>
+        <p>Run local Windows games in an optional offline jail with its own game
+        copy, Windows settings, and saves. Lutris games can fill in their launch
+        settings automatically.</p>
+        <ul>
+          <li>Keep each jailed game's files separate from the original installation.</li>
+          <li>Inspect launch logs and stop an individual game's jail from Klay.</li>
+          <li>Support compatible gamepads connected before launch.</li>
+        </ul>
+        <p>The jail shares the Linux kernel and desktop services. It reduces
+        exposure, but does not guarantee that a game is safe or compatible.
+        Online features are unavailable and saves stay in the separate copy.</p>
+      </description>
+    </release>
+  </releases>
 </component>
