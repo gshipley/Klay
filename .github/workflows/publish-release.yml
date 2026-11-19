@@ -3,12 +3,21 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build and publish
+        required: true
+        type: string
 
 permissions:
   contents: read
 
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -16,26 +25,26 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51@sha256:78d969b18225ae107ca29497bf09c4a3f791e5f1838a9a912a529d0024fb6210
-      options: --privileged
+      # Flatpak updates rename SDK deployments; image-layer directories cannot
+      # be renamed on OverlayFS. Docker prepopulates this writable volume.
+      options: --privileged --volume /var/lib/flatpak
     steps:
-      - name: Checkout
+      - name: Validate release tag
+        shell: bash
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+
+      - name: Checkout release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
           fetch-depth: 0
           persist-credentials: false
-
-      - name: Validate release tag
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          printf '%s\n' "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
 
       - name: Audit pinned Python dependencies
         run: python3 build-aux/audit-dependencies.py
 
       - name: Sync Meson version with tag
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           version="${RELEASE_TAG#v}"
           sed -i -E "/^[[:space:]]*version:[[:space:]]*'/ s/'[^']+'/'${version}'/" meson.build
@@ -50,8 +59,6 @@ jobs:
           upload-artifact: false
 
       - name: Create release notes
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           tag="$RELEASE_TAG"
           release_doc="docs/releases/${tag}.md"
@@ -144,5 +151,5 @@ jobs:
           files: |
             com.grantshipley.Klay.Devel.flatpak
           fail_on_unmatched_files: true
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
           body_path: release_notes
