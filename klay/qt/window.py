@@ -229,8 +229,11 @@ def _store_logo_icon(store: str) -> QIcon:
     candidates = [slug]
     candidates.extend(slug_aliases.get(slug, ()))
 
+    app = QApplication.instance()
+    dark_surface = app is not None and app.palette().window().color().lightness() < 128
+    xbox_symbol = "xbox_symbol_on_dark.svg" if dark_surface else "xbox_symbol_on_light.svg"
     preferred_files_by_slug = {
-        "xbox": ("xbox_logo.png", "xbox_logo.jpg", "xbox_logo.svg"),
+        "xbox": (xbox_symbol, "xbox_logo.png", "xbox_logo.jpg", "xbox_logo.svg"),
         "ubisoft": ("ubisoft_logo.png",),
     }
 
@@ -366,6 +369,11 @@ def _geforcenow_state_dirs() -> tuple[Path, ...]:
 
 
 def _source_icon(source: str) -> QIcon:
+    if source == "nexus":
+        icon = _store_logo_icon("xbox")
+        if not icon.isNull():
+            return icon
+
     if source.startswith(CATEGORY_FILTER_PREFIX):
         icon = QIcon.fromTheme("tag-symbolic")
         if not icon.isNull():
@@ -514,6 +522,8 @@ def _preferred_store_for_card_badge(game: GameEntry) -> str:
     base_source = game.base_source
     if base_source == "steam":
         return "steam"
+    if base_source == "nexus":
+        return "xbox"
     if base_source == "heroic" and "_" in source:
         return source.split("_", 1)[1]
     if base_source == "legendary":
@@ -1766,6 +1776,7 @@ class KlayMainWindow(QMainWindow):
             app.setPalette(self._build_dark_palette())
         else:
             app.setPalette(QPalette(self._default_palette))
+        _cached_game_card_badge_pixmap.cache_clear()
         app.setStyleSheet("")
 
         if hasattr(self, "sidebar_frame"):

@@ -62,6 +62,12 @@
     <key name="heroic-import-sideload" type="b">
       <default>true</default>
     </key>
+    <key name="nexus" type="b">
+      <default>true</default>
+    </key>
+    <key name="nexus-location" type="s">
+      <default>"~/.config/xodus-nexus"</default>
+    </key>
     <key name="bottles" type="b">
       <default>true</default>
     </key>

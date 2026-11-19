@@ -44,6 +44,7 @@ Klay is probably not for you if you only use a single launcher and never want to
   - GeForce NOW
   - Lutris
   - Heroic
+  - Nexus (installed Xbox PC / Game Pass games)
   - Bottles
   - itch
   - Legendary
@@ -176,6 +177,18 @@ Native controller access in the Flatpak requires Flatpak 1.15.6 or newer.
 - Enable/disable sources in `Preferences -> Sources`.
 - Configure source paths if your launchers are in non-default locations.
 - You can trigger an on-demand import from `Preferences -> Import -> Import Games Now`.
+
+### Nexus / Xbox Game Pass
+
+Install and manage supported Xbox PC and Game Pass games in
+[Nexus Launcher](https://github.com/domsvoboda/nexus-launcher), then
+run `Import` in Klay. Installed games appear under `Nexus` with the Xbox logo.
+Klay launches them through Nexus, which manages sign-in, licenses, updates,
+and its game runtime. Compatibility depends on the game and Nexus runtime.
+
+The source is enabled by default in `Preferences -> Sources`. If you use a
+custom Nexus profile, set its `Config Directory` there; the default is
+`~/.config/xodus-nexus`.
 
 ### Run a local Windows game in a jail
 

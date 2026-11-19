@@ -136,6 +136,7 @@ def _load_source_classes(errors: list[str]) -> list[type]:
             ("steam_source", "SteamSource"),
             ("lutris_source", "LutrisSource"),
             ("heroic_source", "HeroicSource"),
+            ("nexus_source", "NexusSource"),
             ("bottles_source", "BottlesSource"),
             ("geforcenow_source", "GeForceNowSource"),
             ("flatpak_source", "FlatpakSource"),
@@ -1476,6 +1477,7 @@ def _run_import() -> dict[str, Any]:
     igdb_cover_cache: dict[str, str | None] = {}
     seen_ids: set[str] = set()
     scanned_ids: set[str] = set()
+    completed_sources: set[str] = set()
     emit_start_done = False
     gfn_cover_migration_pending = not settings.get_state_bool(
         GFN_KEY_ART_SQUARE_FILL_MIGRATION_STATE_KEY,
@@ -1524,6 +1526,7 @@ def _run_import() -> dict[str, Any]:
             errors=len(errors),
         )
         gfn_cover_migration_seen = False
+        source_scan_failed = False
         try:
             source_iter = iter(source)
         except Exception as error:  # pylint: disable=broad-exception-caught
@@ -1538,6 +1541,7 @@ def _run_import() -> dict[str, Any]:
             except StopIteration:
                 break
             except Exception as error:  # pylint: disable=broad-exception-caught
+                source_scan_failed = True
                 errors.append(
                     f"{source_class.__name__} scan error: {type(error).__name__}: {error}"
                 )
@@ -1750,6 +1754,9 @@ def _run_import() -> dict[str, Any]:
                 cover_updated=cover_updated,
             )
 
+        if not source_scan_failed:
+            completed_sources.add(source_id)
+
         if gfn_cover_migration_pending and source_id == "geforcenow" and gfn_cover_migration_seen:
             settings.set_state_bool(GFN_KEY_ART_SQUARE_FILL_MIGRATION_STATE_KEY, True)
             gfn_cover_migration_pending = False
@@ -1760,6 +1767,10 @@ def _run_import() -> dict[str, Any]:
             if base_source == "imported":
                 continue
             if not _source_enabled(settings, base_source):
+                continue
+            # A missing/unreadable launcher library is not evidence of an
+            # uninstall. Only reconcile sources whose scan finished cleanly.
+            if base_source not in completed_sources:
                 continue
             if game_id in seen_ids:
                 continue

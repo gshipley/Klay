@@ -92,6 +92,11 @@ class DesktopSourceIterable(SourceIterable):
                 try:
                     keyfile.load_from_file(str(entry), 0)
 
+                    # NexusSource imports its complete installed library,
+                    # including games without a desktop shortcut yet.
+                    if "X-Xodus-Nexus-Game" in keyfile.get_keys("Desktop Entry")[0]:
+                        continue
+
                     if "Game" not in keyfile.get_string_list(
                         "Desktop Entry", "Categories"
                     ):

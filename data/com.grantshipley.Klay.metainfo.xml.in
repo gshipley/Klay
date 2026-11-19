@@ -18,6 +18,19 @@
   <translation type="gettext">@GETTEXT_DOMAIN@</translation>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.2.8" date="2026-11-19">
+      <description>
+        <p>Klay now supports installed Xbox PC and Game Pass games through
+        Nexus Launcher. Import supported games and launch them from Klay while
+        Nexus manages sign-in, licenses, and the game runtime.</p>
+        <ul>
+          <li>Add a Nexus source with configurable profile discovery.</li>
+          <li>Show green Xbox symbols suited to light and dark themes.</li>
+          <li>Avoid duplicate desktop shortcuts for Nexus games.</li>
+          <li>Keep imported games when a launcher library cannot be read.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.2.7" date="2026-10-16">
       <description>
         <p>Run local Windows games in an optional offline jail with its own game

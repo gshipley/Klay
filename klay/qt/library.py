@@ -214,6 +214,7 @@ class GameLibrary:
         "geforcenow": "GeForce NOW",
         "lutris": "Lutris",
         "heroic": "Heroic",
+        "nexus": "Nexus",
         "desktop": "Desktop Entries",
         "flatpak": "Flatpak",
         "bottles": "Bottles",

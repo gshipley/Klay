@@ -49,6 +49,7 @@ SOURCE_LAYOUT = (
         ),
     ),
     ("heroic", "Heroic", (("heroic-location", "Config Directory"),)),
+    ("nexus", "Nexus", (("nexus-location", "Config Directory"),)),
     ("bottles", "Bottles", (("bottles-location", "Data Directory"),)),
     ("itch", "itch", (("itch-location", "Config Directory"),)),
     ("legendary", "Legendary", (("legendary-location", "Config Directory"),)),
