@@ -18,6 +18,18 @@
   <translation type="gettext">@GETTEXT_DOMAIN@</translation>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.2.9" date="2026-11-19">
+      <description>
+        <p>Security updates for artwork downloads, image processing, and the
+        bundled Qt libraries.</p>
+        <ul>
+          <li>Update vulnerable Python dependencies and the certificate trust store.</li>
+          <li>Move to a supported GNOME runtime and SDK.</li>
+          <li>Limit downloaded artwork size, decoded pixels, and animation frames.</li>
+          <li>Harden release builds and check dependency advisories automatically.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.2.8" date="2026-11-19">
       <description>
         <p>Klay now supports installed Xbox PC and Game Pass games through

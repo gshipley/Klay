@@ -22,15 +22,15 @@ except ModuleNotFoundError:
     requests = None  # type: ignore[assignment]
 
 try:
-    from PIL import Image, ImageFilter, ImageOps, ImageSequence
+    from PIL import Image, ImageFilter, ImageOps
 except ModuleNotFoundError:
     Image = None  # type: ignore[assignment]
     ImageFilter = None  # type: ignore[assignment]
     ImageOps = None  # type: ignore[assignment]
-    ImageSequence = None  # type: ignore[assignment]
 
 from klay.qt.settings import SettingsBackend
 from klay.qt.game_storage import update_game_file
+from klay.qt.artwork import artwork_frames, download_artwork, open_artwork, svg_icon_png
 
 
 COVER_SIZE = (200, 300)
@@ -206,13 +206,6 @@ def _compose_cover(
     return ImageOps.fit(image.convert("RGB"), COVER_SIZE, method=LANCZOS).convert("RGB")
 
 
-def _cover_base(covers_dir: Path, game_id: str) -> Path:
-    covers_dir.mkdir(parents=True, exist_ok=True)
-    for suffix in COVER_SUFFIXES:
-        (covers_dir / f"{game_id}.{suffix}").unlink(missing_ok=True)
-    return covers_dir / game_id
-
-
 def _save_cover_from_path(
     *,
     cover_path: Path,
@@ -222,93 +215,75 @@ def _save_cover_from_path(
     fill_square: bool = False,
 ) -> bool:
     def _save_with_pillow(path: Path) -> bool:
-        if Image is None or ImageSequence is None:
-            return False
-
+        temporary: Path | None = None
+        frames: list[Image.Image] = []
         try:
-            with Image.open(path) as image:
-                target = _cover_base(covers_dir, game_id)
-                if getattr(image, "is_animated", False):
-                    frames: list[Image.Image] = []
-                    durations: list[int] = []
-                    for frame in ImageSequence.Iterator(image):
-                        frames.append(
-                            _compose_cover(
-                                frame.convert("RGBA"),
-                                icon_mode=False,
-                                fill_square=fill_square,
-                            )
+            with open_artwork(path) as image:
+                durations: list[int] = []
+                for frame in artwork_frames(image):
+                    frames.append(_compose_cover(
+                        frame, icon_mode=icon_mode, fill_square=fill_square,
+                    ))
+                    durations.append(max(20, min(60_000, int(frame.info.get("duration", 100)))))
+                if not frames:
+                    return False
+                covers_dir.mkdir(parents=True, exist_ok=True)
+                suffix = ".gif" if len(frames) > 1 else ".png"
+                with tempfile.NamedTemporaryFile(dir=covers_dir, suffix=suffix, delete=False) as output:
+                    temporary = Path(output.name)
+                    if len(frames) > 1:
+                        frames[0].save(
+                            output, format="GIF", save_all=True, append_images=frames[1:],
+                            duration=durations, loop=0,
                         )
-                        durations.append(int(frame.info.get("duration", 100)))
-                    if not frames:
-                        return False
-                    frames[0].save(
-                        target.with_suffix(".gif"),
-                        save_all=True,
-                        append_images=frames[1:],
-                        duration=durations,
-                        loop=0,
-                    )
-                    return True
-
-                still = _compose_cover(
-                    image,
-                    icon_mode=icon_mode,
-                    fill_square=fill_square,
-                )
-                still.save(target.with_suffix(".png"), format="PNG", optimize=True)
+                    else:
+                        frames[0].save(output, format="PNG", optimize=True)
+                target = covers_dir / f"{game_id}{suffix}"
+                os.replace(temporary, target)
+                # Preserve the previous cover until a complete replacement exists.
+                for old_suffix in COVER_SUFFIXES:
+                    old = covers_dir / f"{game_id}.{old_suffix}"
+                    if old != target:
+                        old.unlink(missing_ok=True)
                 return True
         except Exception:  # pylint: disable=broad-exception-caught
             return False
+        finally:
+            for frame in frames:
+                frame.close()
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
-    if Image is None or ImageSequence is None:
-        # Keep behavior predictable: no processing pipeline available.
-        return False
-
-    if not cover_path.is_file():
+    if Image is None or not cover_path.is_file():
         return False
     if _save_with_pillow(cover_path):
         return True
-
-    # Fallback path: desktop/flatpak launchers often provide SVG icons that Pillow
-    # cannot decode directly. Load with GdkPixbuf and then process via Pillow.
-    try:
-        import gi
-
-        gi.require_version("GdkPixbuf", "2.0")
-        from gi.repository import GdkPixbuf
-    except Exception:  # pylint: disable=broad-exception-caught
+    # Only bounded, self-contained SVG launcher icons get a separate renderer.
+    # A rejected raster must never bypass the limits through GdkPixbuf.
+    if cover_path.suffix.lower() != ".svg":
         return False
-
+    temporary: Path | None = None
     try:
-        pixbuf = GdkPixbuf.Pixbuf.new_from_file(str(cover_path))
-    except Exception:  # pylint: disable=broad-exception-caught
-        return False
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as open_file:
-        tmp_path = Path(open_file.name)
-    try:
-        pixbuf.savev(str(tmp_path), "png", [], [])
-        return _save_with_pillow(tmp_path)
+        png = svg_icon_png(cover_path)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as output:
+            temporary = Path(output.name)
+            output.write(png)
+        return _save_with_pillow(temporary)
     except Exception:  # pylint: disable=broad-exception-caught
         return False
     finally:
-        tmp_path.unlink(missing_ok=True)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _download_to_temp(url: str) -> Path | None:
     if requests is None:
         return None
-
     try:
-        response = requests.get(url, timeout=DOWNLOAD_TIMEOUT_SECONDS)
-        response.raise_for_status()
+        path, _content_type = download_artwork(requests, url, timeout=DOWNLOAD_TIMEOUT_SECONDS)
+        return path
     except Exception:  # pylint: disable=broad-exception-caught
         return None
-    suffix = Path(url).suffix or ".img"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as open_file:
-        open_file.write(response.content)
-        return Path(open_file.name)
 
 
 def _sgdb_cover_url(

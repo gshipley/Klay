@@ -20,6 +20,10 @@ import webbrowser
 
 from klay.qt import jail
 from klay.qt.game_storage import read_game_file, update_game_file
+from klay.qt.artwork import (
+    ArtworkError, FORMAT_SUFFIXES, MAX_DOWNLOAD_BYTES, download_artwork,
+    open_artwork, validate_artwork,
+)
 try:
     import requests
 except ModuleNotFoundError:
@@ -376,17 +380,42 @@ class GameLibrary:
         return None
 
     def set_cover(self, game: GameEntry, cover_source: Path | None) -> None:
-        for suffix in ("tiff", "gif", "png", "jpg", "jpeg", "webp"):
-            (self.covers_dir / f"{game.game_id}.{suffix}").unlink(missing_ok=True)
-
         if cover_source is None:
+            for suffix in ("tiff", "gif", "png", "jpg", "jpeg", "webp"):
+                (self.covers_dir / f"{game.game_id}.{suffix}").unlink(missing_ok=True)
             return
 
-        suffix = cover_source.suffix.lower().lstrip(".")
-        if suffix not in {"tiff", "gif", "png", "jpg", "jpeg", "webp"}:
-            suffix = "png"
-        destination = self.covers_dir / f"{game.game_id}.{suffix}"
-        shutil.copy2(cover_source, destination)
+        temporary = None
+        try:
+            with cover_source.open("rb") as source, tempfile.NamedTemporaryFile(
+                dir=self.covers_dir, suffix=".tmp", delete=False,
+            ) as output:
+                temporary = Path(output.name)
+                total = 0
+                while chunk := source.read(64 * 1024):
+                    total += len(chunk)
+                    if total > MAX_DOWNLOAD_BYTES:
+                        raise ArtworkError("Artwork exceeds the 32 MiB file limit.")
+                    output.write(chunk)
+            try:
+                image_format = validate_artwork(temporary)
+            except ArtworkError:
+                raise
+            except Exception as error:
+                raise ArtworkError("The selected artwork could not be read.") from error
+            if image_format not in {"PNG", "JPEG", "GIF", "WEBP", "TIFF"}:
+                raise ArtworkError("Choose a PNG, JPEG, GIF, WebP, or TIFF cover.")
+            destination = self.covers_dir / f"{game.game_id}{FORMAT_SUFFIXES[image_format]}"
+            os.replace(temporary, destination)
+            for suffix in ("tiff", "gif", "png", "jpg", "jpeg", "webp"):
+                previous = self.covers_dir / f"{game.game_id}.{suffix}"
+                if previous != destination:
+                    previous.unlink(missing_ok=True)
+        except (ValueError, SyntaxError) as error:
+            raise ArtworkError("The selected artwork could not be read.") from error
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
     @staticmethod
     def _remote_image_suffix(
@@ -430,47 +459,30 @@ class GameLibrary:
         for suffix in (".gif", ".png", ".jpg", ".jpeg", ".webp", ".tiff"):
             cached = self.cover_cache_dir / f"{cache_key}{suffix}"
             if cached.is_file():
-                return cached
+                try:
+                    if validate_artwork(cached) not in {"PNG", "JPEG", "GIF", "WEBP", "TIFF"}:
+                        raise ArtworkError("Unsupported cached artwork.")
+                    return cached
+                except Exception:
+                    cached.unlink(missing_ok=True)
 
+        temporary = None
         try:
-            response = requests.get(
-                normalized,
-                timeout=timeout,
+            temporary, _content_type = download_artwork(
+                requests, normalized, timeout=timeout, directory=self.cover_cache_dir,
                 headers={"User-Agent": "Klay/1.0 (+https://github.com/gshipley/Klay)"},
             )
-            response.raise_for_status()
-            payload = response.content
-            content_type = str(response.headers.get("Content-Type") or "")
+            image_format = validate_artwork(temporary)
+            if image_format not in {"PNG", "JPEG", "GIF", "WEBP", "TIFF"}:
+                return None
+            target = self.cover_cache_dir / f"{cache_key}{FORMAT_SUFFIXES[image_format]}"
+            os.replace(temporary, target)
+            return target
         except Exception:
             return None
-
-        suffix = self._remote_image_suffix(
-            normalized,
-            mime=mime,
-            animated=animated,
-            content_type=content_type,
-        )
-        target = self.cover_cache_dir / f"{cache_key}{suffix}"
-        try:
-            with tempfile.NamedTemporaryFile(
-                "wb",
-                dir=str(self.cover_cache_dir),
-                prefix=f"{cache_key}.",
-                suffix=".tmp",
-                delete=False,
-            ) as open_file:
-                open_file.write(payload)
-                open_file.flush()
-                os.fsync(open_file.fileno())
-                tmp_path = Path(open_file.name)
-            os.replace(tmp_path, target)
-        except OSError:
-            tmp_path = locals().get("tmp_path")
-            if isinstance(tmp_path, Path):
-                tmp_path.unlink(missing_ok=True)
-            return None
-
-        return target
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
     def cached_remote_thumbnail_path(
         self,
@@ -491,23 +503,21 @@ class GameLibrary:
         if source is None:
             return None
 
-        width = max(32, int(width))
-        height = max(32, int(height))
-        key_source = f"{str(url).strip()}|{width}x{height}|v2"
+        width = max(32, min(2048, int(width)))
+        height = max(32, min(2048, int(height)))
+        key_source = f"{str(url).strip()}|{width}x{height}|v3"
         cache_key = hashlib.sha256(key_source.encode("utf-8")).hexdigest()
         target = self.cover_thumb_cache_dir / f"{cache_key}.png"
         if target.is_file():
             return target
 
         if Image is None or ImageOps is None:
-            return source
+            return None
 
         lz = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
         tmp_path: Path | None = None
         try:
-            with Image.open(source) as image:
-                if getattr(image, "is_animated", False):
-                    image.seek(0)
+            with open_artwork(source) as image:
                 frame = image.convert("RGB")
                 thumb = ImageOps.fit(frame, (width, height), method=lz)
                 with tempfile.NamedTemporaryFile(
@@ -525,7 +535,7 @@ class GameLibrary:
         except Exception:
             if tmp_path is not None:
                 tmp_path.unlink(missing_ok=True)
-            return source
+            return None
         return target
 
     @staticmethod
